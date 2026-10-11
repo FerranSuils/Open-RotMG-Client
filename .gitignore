@@ -1,3 +1,6 @@
 *.pem
 *.key
 .env
+/vendor/
+/.ruffle-*.zip
+__pycache__/
