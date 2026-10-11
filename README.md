@@ -10,7 +10,7 @@ Linux/macOS: `./run.sh` · Windows: `.\run.bat`
 
 The launcher downloads verified Ruffle assets and starts the Rust backend. Open http://127.0.0.1:18923/ . The development map and gameplay rules are incomplete; historical fidelity is not yet verified.
 
-Generated Ruffle includes a hash-checked ALPHA-mask fix for black sprite rectangles; the official archive and reference SWF stay unchanged.
+Generated Ruffle includes hash-checked fixes for black sprite rectangles and disposed bitmap fills. The official archive and reference SWF stay unchanged.
 
 Use `--prepare-only` to install Ruffle without starting the backend, or `--dev-control` to enable loopback script control.
 

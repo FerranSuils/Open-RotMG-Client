@@ -24,21 +24,25 @@ class RufflePreparationTests(unittest.TestCase):
         with ZipFile(cls.cache) as archive:
             cls.originals = {name: archive.read(name) for name in run.WASM_SHA256}
         cls.patched_hashes = {
-            "172de42e6619eac8f371.wasm": "4cf2c5941611b66eee3c60846f0e0540516b9e2ebc131d2158ef1fba629c9d35",
-            "878d548199cddef07035.wasm": "c3ca1ddf2f88e5ddd6dc670f8d962db8c38f4255fd518d1a90dfbfa2815430db",
+            "172de42e6619eac8f371.wasm": "b59ba0f183efc7612431283527d116a277d9439f7e362a75d12ecb774150c3fe",
+            "878d548199cddef07035.wasm": "1eb6684d691f0c533ae0f68630da2ad198fc9b6edfb1926a628f64ed4c7583d6",
         }
 
-    def test_exact_patch_preserves_binary_length(self):
+    def test_exact_patch_and_code_lengths(self):
         for name, original in self.originals.items():
             with self.subTest(name=name):
-                result = run.patch_alpha(name, original)
-                self.assertEqual(len(result), len(original))
+                result = run.patch_wasm(name, original)
+                self.assertEqual(len(result), len(original) + 37)
+                code_at, code_size, function_at, function_size, *_ = run.DISPOSED_FILL[name]
+                for position, size, width in [(code_at, code_size, 4), (function_at, function_size, 2)]:
+                    actual = sum((result[position + i] & 127) << (i * 7) for i in range(width))
+                    self.assertEqual(actual, size + 37)
                 self.assertEqual(hashlib.sha256(result).hexdigest(), self.patched_hashes[name])
 
     def test_modified_build_rejected(self):
         for name, original in self.originals.items():
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "WASM checksum mismatch"):
-                run.patch_alpha(name, original[:-1] + bytes([original[-1] ^ 1]))
+                run.patch_wasm(name, original[:-1] + bytes([original[-1] ^ 1]))
 
     def test_missing_or_duplicate_shader_rejected(self):
         name = next(iter(self.originals))
@@ -46,7 +50,23 @@ class RufflePreparationTests(unittest.TestCase):
             with self.subTest(count=data.count(run.ALPHA_ANCHOR)):
                 with patch.dict(run.WASM_SHA256, {name: hashlib.sha256(data).hexdigest()}):
                     with self.assertRaisesRegex(RuntimeError, "ALPHA shader mismatch"):
-                        run.patch_alpha(name, data)
+                        run.patch_wasm(name, data)
+
+    def test_misplaced_native_anchor_rejected(self):
+        for name, original in self.originals.items():
+            entry = list(run.DISPOSED_FILL[name])
+            entry[4] += 1
+            with self.subTest(name=name), patch.dict(run.DISPOSED_FILL, {name: tuple(entry)}):
+                with self.assertRaisesRegex(RuntimeError, "disposed-fill anchor mismatch"):
+                    run.patch_wasm(name, original)
+
+    def test_native_code_length_overflow_rejected(self):
+        name = next(iter(self.originals))
+        entry = list(run.DISPOSED_FILL[name])
+        entry[1] = 1 << 28
+        with patch.dict(run.DISPOSED_FILL, {name: tuple(entry)}):
+            with self.assertRaisesRegex(RuntimeError, "disposed-fill patch exceeds reserved length"):
+                run.patch_wasm(name, self.originals[name])
 
     def test_preparation_is_repeatable_and_preserves_official_archive(self):
         with tempfile.TemporaryDirectory() as directory:

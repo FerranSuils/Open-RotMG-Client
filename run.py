@@ -17,9 +17,13 @@ WASM_SHA256 = {
     "878d548199cddef07035.wasm": "af9b6a13a8f5e8d305bc3ce28a4edf3f6242df1183e8576ad4ca086e9f21eaea",
 }
 ALPHA_ANCHOR = b"    if (src.a > 0.0) {\n        return vec4<f32>(dst.rgb * src.a, src.a * dst.a);"
+DISPOSED_FILL = {
+    "172de42e6619eac8f371.wasm": (97170, 10078284, 6805893, 775, 6806422, 8, 6, "20 06 20 06 41 0c 6a 20 01 28 02 14 22 01"),
+    "878d548199cddef07035.wasm": (104679, 10030681, 5514290, 1098, 5515119, 11, 8, "20 08 41 08 6a 20 08 41 14 6a 20 01 28 02 14 22 01"),
+}
 
 
-def patch_alpha(name, data):
+def patch_wasm(name, data):
     actual = hashlib.sha256(data).hexdigest()
     if actual != WASM_SHA256[name]:
         raise RuntimeError(f"Ruffle WASM checksum mismatch for {name}: expected {WASM_SHA256[name]}, got {actual}")
@@ -31,7 +35,26 @@ def patch_alpha(name, data):
     replacement = b"    // OpenRotMG: restore transparent pixels in ALPHA masks.\n    return vec4<f32>(dst.rgb * src.a, src.a * dst.a);"
     if len(replacement) > end - start:
         raise RuntimeError(f"Ruffle ALPHA shader replacement exceeds reserved length in {name}")
-    return data[:start] + replacement.ljust(end - start, b" ") + data[end:]
+    data = bytearray(data[:start] + replacement.ljust(end - start, b" ") + data[end:])
+    code_at, code_size, function_at, function_size, insert_at, bitmap, stack, anchor = DISPOSED_FILL[name]
+    anchor = bytes.fromhex(anchor)
+    if data[insert_at:insert_at + len(anchor)] != anchor:
+        raise RuntimeError(f"Ruffle disposed-fill anchor mismatch for {name}")
+    # Flash keeps disposed bitmap fills transparent, including their bounds and hit testing.
+    guard = bytes.fromhex(
+        f"20 {bitmap:02x} 2d 00 4d 41 01 46 04 40 "
+        "20 00 41 80 80 80 80 78 36 02 00 20 00 41 00 36 02 04 "
+        f"20 {stack:02x} 41 30 6a 24 00 0f 0b"
+    )
+    for position, size, width in [(code_at, code_size, 4), (function_at, function_size, 2)]:
+        size += len(guard)
+        if size >= 1 << (width * 7):
+            raise RuntimeError(f"Ruffle disposed-fill patch exceeds reserved length in {name}")
+        data[position:position + width] = bytes(
+            ((size >> (i * 7)) & 127) | (128 if i < width - 1 else 0) for i in range(width)
+        )
+    data[insert_at:insert_at] = guard
+    return bytes(data)
 
 
 def prepare_ruffle():
@@ -53,8 +76,8 @@ def prepare_ruffle():
         archive.extractall(ROOT / "vendor", members=assets)
     for name in WASM_SHA256:
         path = ROOT / "vendor" / name
-        path.write_bytes(patch_alpha(name, path.read_bytes()))
-    print(f"Prepared Ruffle {VERSION} with transparent ALPHA-mask fix from verified archive", flush=True)
+        path.write_bytes(patch_wasm(name, path.read_bytes()))
+    print(f"Prepared Ruffle {VERSION} with ALPHA-mask and disposed-fill fixes from verified archive", flush=True)
 
 
 if __name__ == "__main__":
