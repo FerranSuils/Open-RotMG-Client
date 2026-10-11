@@ -1,8 +1,14 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "AS3 PEM parser delimiter literals are not private key material"
+[[rules]]
+id = "private-key"
+description = "Private-key material, including archived source"
+regex = '''(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]{64,}?KEY(?: BLOCK)?-----'''
+keywords = ["-----begin"]
+
+[[rules.allowlists]]
+description = "Exempt the PEM parser delimiter finding, never the whole file"
 condition = "AND"
 paths = ['(^|/)com/hurlant/util/der/PEM\.as$']
 regexTarget = "match"
