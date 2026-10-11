@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pem
+*.key
+.env
+/browser/vendor/*.map
+.idea/

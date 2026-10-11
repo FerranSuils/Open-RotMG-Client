@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "AS3 PEM parser delimiter literals are not private key material"
+condition = "AND"
+paths = ['(^|/)com/hurlant/util/der/PEM\.as$']
+regexTarget = "match"
+regexes = ['-----BEGIN RSA PRIVATE KEY-----";\s*private static const RSA_PRIVATE_KEY_FOOTER:String = "-----END RSA PRIVATE KEY-----']

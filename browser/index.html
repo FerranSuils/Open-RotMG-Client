@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; media-src 'self' blob:">
+<title>OpenRotMG 123.5.1 Ruffle startup probe</title>
+<style>body { background:#20242a;color:white;font:16px sans-serif } ruffle-player { width:800px;height:600px;display:block } pre {white-space:pre-wrap}</style>
+<h1>OpenRotMG 123.5.1 startup probe</h1>
+<p>Unmodified recovered client. External requests are blocked. No game server is connected.</p>
+<div id="client"></div><pre id="status">Loading…</pre>
+<script src="vendor/ruffle.js"></script>
+<script>
+(async () => {
+  const player = window.RufflePlayer.newest().createPlayer();
+  document.querySelector('#client').append(player);
+  const accountEndpoint = new URL('/legacy-api/', location.href).href;
+  await player.ruffle().load({
+    url:'../reference/123.5.1/trapped.swf',
+    autoplay:'on',unmuteOverlay:'hidden',preferredRenderer:'wgpu-webgl',
+    logLevel:'info',openUrlMode:'deny',allowScriptAccess:false,
+    urlRewriteRules:[[/^https?:\/\/127\.0\.0\.1:8080\//,accountEndpoint]]
+  });
+  document.querySelector('#status').textContent = 'SWF load() resolved. No account backend or gameplay verified.';
+})().catch(error => {
+  document.querySelector('#status').textContent = String(error);
+  console.error(error);
+});
+</script>
