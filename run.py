@@ -12,6 +12,26 @@ ROOT = Path(__file__).resolve().parent
 VERSION = "0.7.1"
 URL = f"https://github.com/ruffle-rs/ruffle/releases/download/v{VERSION}/ruffle-{VERSION}-web-selfhosted.zip"
 SHA256 = "ef12edbee135d581a9cd523837d746da30a07a64dbf1cf472d2e472c656f4b5e"
+WASM_SHA256 = {
+    "172de42e6619eac8f371.wasm": "1ed33b9b71a6b01b9aafafed660be343ffeb2d246c5d79e6425a32bf93e38207",
+    "878d548199cddef07035.wasm": "af9b6a13a8f5e8d305bc3ce28a4edf3f6242df1183e8576ad4ca086e9f21eaea",
+}
+ALPHA_ANCHOR = b"    if (src.a > 0.0) {\n        return vec4<f32>(dst.rgb * src.a, src.a * dst.a);"
+
+
+def patch_alpha(name, data):
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != WASM_SHA256[name]:
+        raise RuntimeError(f"Ruffle WASM checksum mismatch for {name}: expected {WASM_SHA256[name]}, got {actual}")
+    count = data.count(ALPHA_ANCHOR)
+    if count != 1:
+        raise RuntimeError(f"Ruffle ALPHA shader mismatch for {name}: expected one anchor, got {count}")
+    start = data.index(ALPHA_ANCHOR)
+    end = data.index(b"\n}", start)
+    replacement = b"    // OpenRotMG: restore transparent pixels in ALPHA masks.\n    return vec4<f32>(dst.rgb * src.a, src.a * dst.a);"
+    if len(replacement) > end - start:
+        raise RuntimeError(f"Ruffle ALPHA shader replacement exceeds reserved length in {name}")
+    return data[:start] + replacement.ljust(end - start, b" ") + data[end:]
 
 
 def prepare_ruffle():
@@ -31,7 +51,10 @@ def prepare_ruffle():
     with ZipFile(io.BytesIO(data)) as archive:
         assets = [name for name in archive.namelist() if name.endswith((".js", ".wasm")) or name in ("LICENSE_MIT", "LICENSE_APACHE")]
         archive.extractall(ROOT / "vendor", members=assets)
-    print(f"Prepared Ruffle {VERSION} from verified archive", flush=True)
+    for name in WASM_SHA256:
+        path = ROOT / "vendor" / name
+        path.write_bytes(patch_alpha(name, path.read_bytes()))
+    print(f"Prepared Ruffle {VERSION} with transparent ALPHA-mask fix from verified archive", flush=True)
 
 
 if __name__ == "__main__":
