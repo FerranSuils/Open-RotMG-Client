@@ -1,10 +1,10 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; media-src 'self' blob:">
-<title>OpenRotMG 123.5.1 Ruffle startup probe</title>
+<title>OpenRotMG 123.5.1 development</title>
 <style>body { background:#20242a;color:white;font:16px sans-serif } ruffle-player { width:800px;height:600px;display:block } pre {white-space:pre-wrap}</style>
-<h1>OpenRotMG 123.5.1 startup probe</h1>
-<p>Unmodified recovered client. External requests are blocked. No game server is connected.</p>
+<h1>OpenRotMG 123.5.1 development</h1>
+<p>Requires the OpenRotMG development backend. Full gameplay and historical fidelity are still being verified. External requests are blocked.</p>
 <div id="client"></div><pre id="status">Loading…</pre>
 <script src="vendor/ruffle.js"></script>
 <script>
@@ -12,13 +12,20 @@
   const player = window.RufflePlayer.newest().createPlayer();
   document.querySelector('#client').append(player);
   const accountEndpoint = new URL('/legacy-api/', location.href).href;
+  const audioEndpoint = new URL('/sfx/', location.href).href;
+  const socketEndpoint = new URL('/game', location.href);
+  socketEndpoint.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   await player.ruffle().load({
-    url:'client.swf',
+    url:'/client.swf',
     autoplay:'on',unmuteOverlay:'hidden',preferredRenderer:'wgpu-webgl',
     logLevel:'info',openUrlMode:'deny',allowScriptAccess:false,
-    urlRewriteRules:[[/^https?:\/\/127\.0\.0\.1:8080\//,accountEndpoint]]
+    socketProxy:[{host:'127.0.0.1',port:2050,proxyUrl:socketEndpoint.href}],
+    urlRewriteRules:[
+      [/^https?:\/\/127\.0\.0\.1:8080\//,accountEndpoint],
+      [/^https?:\/\/realmofthemadgod\.appspot\.com\/sfx\//,audioEndpoint]
+    ]
   });
-  document.querySelector('#status').textContent = 'SWF load() resolved. No account backend or gameplay verified.';
+  document.querySelector('#status').textContent = 'SWF loaded. This development scene is not a complete or historically verified game.';
 })().catch(error => {
   document.querySelector('#status').textContent = String(error);
   console.error(error);
