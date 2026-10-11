@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import functools
 import hashlib
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import io
 from pathlib import Path
+import shutil
+import subprocess
 from urllib.request import urlopen
 from zipfile import ZipFile
 
@@ -35,17 +35,22 @@ def prepare_ruffle():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare Ruffle and serve the client locally.")
-    parser.add_argument("--prepare-only", action="store_true", help="Install Ruffle without starting HTTP, for static builds")
+    parser = argparse.ArgumentParser(description="Prepare Ruffle and start the OpenRotMG development backend.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prepare-only", action="store_true", help="Install Ruffle without starting the backend")
+    mode.add_argument("--dev-control", action="store_true", help="Enable the backend's loopback script control")
     args = parser.parse_args()
-    if args.prepare_only:
-        prepare_ruffle()
-    else:
-        handler = functools.partial(SimpleHTTPRequestHandler, directory=str(ROOT))
-        with ThreadingHTTPServer(("127.0.0.1", 18923), handler) as server:
-            prepare_ruffle()
-            print("Client: http://127.0.0.1:18923/\nGame backend is not started by this command yet.", flush=True)
-            try:
-                server.serve_forever()
-            except KeyboardInterrupt:
-                print("Stopped client web server", flush=True)
+    server = ROOT.parent / "server"
+    if not args.prepare_only:
+        if not (server / "Cargo.toml").is_file():
+            parser.error(f"Missing sibling Rust server: {server / 'Cargo.toml'}. Clone https://github.com/OpenRotMG/server beside the client repository.")
+        if shutil.which("cargo") is None:
+            parser.error("Cargo not found. Install Rust/Cargo from https://rustup.rs/ and rerun.")
+    prepare_ruffle()
+    if not args.prepare_only:
+        command = ["cargo", "run"] + (["--", "--dev-control"] if args.dev_control else [])
+        print(f"Starting backend in {server}\nClient: http://127.0.0.1:18923/", flush=True)
+        try:
+            raise SystemExit(subprocess.call(command, cwd=server))
+        except KeyboardInterrupt:
+            raise SystemExit(130)
