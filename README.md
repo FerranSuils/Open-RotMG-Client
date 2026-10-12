@@ -4,13 +4,16 @@ Realm of the Mad God **123.5.1** client, running through Ruffle.
 
 ## Run locally
 
-Install Python 3 and Rust/Cargo. Clone https://github.com/OpenRotMG/Open-RotMG-Server beside this repository as `server`.
+The server's `./run.sh` downloads this client automatically. You only need this checkout to work on the client yourself.
+
+Install Python 3, prepare the client, then tell your server to use it:
 
 ```sh
-./run.sh
+./run.sh --prepare-only
+/path/to/server/run.sh --local-client "$PWD"
 ```
 
-Windows: `run.bat`. Open http://127.0.0.1:18923/ to play.
+Open the local URL printed by the server. Server setup: https://github.com/OpenRotMG/Open-RotMG-Server
 
 ---
 
