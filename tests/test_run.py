@@ -1,5 +1,6 @@
 import hashlib
 import io
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,6 +33,24 @@ class LauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not allowed", result.stderr)
         self.assertNotIn("Prepared Ruffle", result.stdout)
+
+
+class ClientRoutingTests(unittest.TestCase):
+    def test_only_legacy_character_api_urls_are_rewritten(self):
+        html = (run.ROOT / "index.html").read_text()
+        pattern = re.search(r"\[/([^\n]+?)/,accountEndpoint\]", html).group(1).replace(r"\/", "/")
+        for port in [8080, 18923, 65535]:
+            origin = f"http://127.0.0.1:{port}"
+            for path in ["client.swf", "vendor/ruffle.js", "sfx/death_screen.mp3", "legacy-api/char/list", "game", "health"]:
+                with self.subTest(port=port, path=path):
+                    url = f"{origin}/{path}"
+                    self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), url)
+            for protocol in ["http", "https"]:
+                for path in ["char/list", "char/fame"]:
+                    url = f"{protocol}://127.0.0.1:8080/{path}"
+                    self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), origin + "/legacy-api/" + path)
+        foreign = "https://127.0.0.1.evil.example:8080/char/list"
+        self.assertEqual(re.sub(pattern, "/legacy-api/", foreign), foreign)
 
 
 class RufflePreparationTests(unittest.TestCase):
