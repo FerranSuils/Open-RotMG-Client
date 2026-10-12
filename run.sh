@@ -1,3 +1,3 @@
 #!/bin/sh
 set -eu
-exec python3 "$(dirname "$0")/run.py" "$@"
+exec python3 "$(dirname "$0")/scripts/run.py" "$@"

@@ -1,2 +1,2 @@
 @echo off
-py -3 "%~dp0run.py" %*
+py -3 "%~dp0scripts\run.py" %*

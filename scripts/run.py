@@ -8,7 +8,7 @@ import subprocess
 from urllib.request import urlopen
 from zipfile import ZipFile
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.7.1"
 URL = f"https://github.com/ruffle-rs/ruffle/releases/download/v{VERSION}/ruffle-{VERSION}-web-selfhosted.zip"
 SHA256 = "ef12edbee135d581a9cd523837d746da30a07a64dbf1cf472d2e472c656f4b5e"
@@ -89,12 +89,12 @@ if __name__ == "__main__":
     server = ROOT.parent / "server"
     if not args.prepare_only:
         if not (server / "Cargo.toml").is_file():
-            parser.error(f"Missing sibling Rust server: {server / 'Cargo.toml'}. Clone https://github.com/OpenRotMG/server beside the client repository.")
+            parser.error(f"Missing sibling Rust server: {server / 'Cargo.toml'}. Clone https://github.com/OpenRotMG/Open-RotMG-Server into a sibling server directory.")
         if shutil.which("cargo") is None:
             parser.error("Cargo not found. Install Rust/Cargo from https://rustup.rs/ and rerun.")
     prepare_ruffle()
     if not args.prepare_only:
-        command = ["cargo", "run"] + (["--", "--dev-control"] if args.dev_control else [])
+        command = ["cargo", "run", "--locked"] + (["--", "--dev-control"] if args.dev_control else [])
         print(f"Starting backend in {server}\nClient: http://127.0.0.1:18923/", flush=True)
         try:
             raise SystemExit(subprocess.call(command, cwd=server))

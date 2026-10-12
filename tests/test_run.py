@@ -2,6 +2,7 @@ import hashlib
 import io
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -9,8 +10,28 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 from zipfile import ZipFile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run
+
+
+class LauncherTests(unittest.TestCase):
+    def test_asset_root_is_the_client_repository(self):
+        self.assertEqual(run.ROOT, Path(__file__).resolve().parents[1])
+
+    def test_shell_entrypoint_works_from_another_directory(self):
+        with tempfile.TemporaryDirectory(prefix="launcher with spaces ") as directory:
+            result = subprocess.run([str(run.ROOT / "run.sh"), "--help"], cwd=directory,
+                                    capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--prepare-only", result.stdout)
+        self.assertIn("--dev-control", result.stdout)
+
+    def test_conflicting_modes_fail_before_preparing_assets(self):
+        result = subprocess.run([str(run.ROOT / "run.sh"), "--prepare-only", "--dev-control"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed", result.stderr)
+        self.assertNotIn("Prepared Ruffle", result.stdout)
 
 
 class RufflePreparationTests(unittest.TestCase):
@@ -18,7 +39,7 @@ class RufflePreparationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.cache = run.ROOT / f".ruffle-{run.VERSION}.zip"
         if not cls.cache.is_file():
-            raise RuntimeError("Run python3 run.py --prepare-only before launcher tests")
+            raise RuntimeError("Run ./run.sh --prepare-only before launcher tests")
         if hashlib.sha256(cls.cache.read_bytes()).hexdigest() != run.SHA256:
             raise RuntimeError("Launcher test archive checksum mismatch")
         with ZipFile(cls.cache) as archive:

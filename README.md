@@ -1,15 +1,17 @@
-<h1><img src="readme-icon.png" width="44" height="44" align="absmiddle" alt=""> Open RotMG / Client</h1>
+<h1><img src=".github/readme-icon.png" width="44" height="44" align="absmiddle" alt=""> Open RotMG / Client</h1>
 
 Realm of the Mad God **123.5.1** client, running through Ruffle.
 
-## Local development
+## Run locally
 
-Requires Python 3 and Rust/Cargo: https://rustup.rs/ . Clone https://github.com/OpenRotMG/server into a sibling `server` directory.
+Install Python 3 and Rust/Cargo. Clone https://github.com/OpenRotMG/Open-RotMG-Server beside this repository as `server`.
 
-Linux/macOS: `./run.sh` · Windows: `.\run.bat`
+```sh
+./run.sh
+```
 
-The launcher downloads verified Ruffle assets and starts the Rust backend. Open http://127.0.0.1:18923/ to play.
+Windows: `run.bat`. Open http://127.0.0.1:18923/ to play.
 
-Use `--prepare-only` to install Ruffle without starting the backend, or `--dev-control` to enable loopback script control.
+---
 
-Discord: https://discord.gg/EwZWNzzYwP
+Join Discord: https://discord.gg/EwZWNzzYwP
