@@ -4,7 +4,6 @@
 <title>OpenRotMG 123.5.1 development</title>
 <style>body { background:#20242a;color:white;font:16px sans-serif } ruffle-player { width:800px;height:600px;display:block } pre {white-space:pre-wrap}</style>
 <h1>OpenRotMG 123.5.1 development</h1>
-<p>Requires the OpenRotMG development backend. Full gameplay and historical fidelity are still being verified. External requests are blocked.</p>
 <div id="client"></div><pre id="status">Loading…</pre>
 <script src="vendor/ruffle.js"></script>
 <script>
@@ -25,7 +24,7 @@
       [/^https?:\/\/realmofthemadgod\.appspot\.com\/sfx\//,audioEndpoint]
     ]
   });
-  document.querySelector('#status').textContent = 'SWF loaded. This development scene is not a complete or historically verified game.';
+  document.querySelector('#status').textContent = '';
 })().catch(error => {
   document.querySelector('#status').textContent = String(error);
   console.error(error);

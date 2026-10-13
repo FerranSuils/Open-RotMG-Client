@@ -36,6 +36,14 @@ class LauncherTests(unittest.TestCase):
 
 
 class ClientRoutingTests(unittest.TestCase):
+    def test_loading_status_clears_without_gameplay_disclaimers(self):
+        html = (run.ROOT / "index.html").read_text()
+        self.assertIn("document.querySelector('#status').textContent = '';", html)
+        self.assertIn("document.querySelector('#status').textContent = String(error);", html)
+        self.assertNotIn("historically verified game", html)
+        self.assertNotIn("historical fidelity", html)
+        self.assertNotIn("External requests are blocked", html)
+
     def test_only_legacy_game_account_api_urls_are_rewritten(self):
         html = (run.ROOT / "index.html").read_text()
         pattern = re.search(r"\[/([^\n]+?)/,accountEndpoint\]", html).group(1).replace(r"\/", "/")
