@@ -36,7 +36,7 @@ class LauncherTests(unittest.TestCase):
 
 
 class ClientRoutingTests(unittest.TestCase):
-    def test_only_legacy_character_api_urls_are_rewritten(self):
+    def test_only_legacy_game_account_api_urls_are_rewritten(self):
         html = (run.ROOT / "index.html").read_text()
         pattern = re.search(r"\[/([^\n]+?)/,accountEndpoint\]", html).group(1).replace(r"\/", "/")
         for port in [8080, 18923, 65535]:
@@ -46,11 +46,11 @@ class ClientRoutingTests(unittest.TestCase):
                     url = f"{origin}/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), url)
             for protocol in ["http", "https"]:
-                for path in ["char/list", "char/fame"]:
+                for path in ["char/list", "char/fame", "account/register", "account/verify", "fame/list"]:
                     url = f"{protocol}://127.0.0.1:8080/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), origin + "/legacy-api/" + path)
-        foreign = "https://127.0.0.1.evil.example:8080/char/list"
-        self.assertEqual(re.sub(pattern, "/legacy-api/", foreign), foreign)
+        for foreign in ["https://127.0.0.1.evil.example:8080/char/list", "http://127.0.0.1:8080/accounting/report", "http://127.0.0.1:8080/credits/buy"]:
+            self.assertEqual(re.sub(pattern, "/legacy-api/", foreign), foreign)
 
 
 class RufflePreparationTests(unittest.TestCase):
