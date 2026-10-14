@@ -1,0 +1,15 @@
+Subject: Preserve transparent disposed bitmap fills
+
+--- a/core/src/avm2/globals/flash/display/graphics.rs
++++ b/core/src/avm2/globals/flash/display/graphics.rs
+@@ -1787,6 +1787,10 @@
+         .as_bitmap_data()
+         .expect("Bitmap argument is ensured to be a BitmapData from actionscript");
+ 
++    if bitmap_data.disposed() {
++        return Ok(FillStyle::Color(swf::Color::TRANSPARENT));
++    }
++
+     let matrix = obj
+         .get_slot(graphics_bitmap_fill_slots::MATRIX)
+         .as_object()

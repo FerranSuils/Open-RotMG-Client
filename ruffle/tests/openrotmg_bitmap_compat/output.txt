@@ -1,0 +1,6 @@
+alpha transparent=0
+alpha opaque=ff000000
+disposed bounds=90x90
+disposed hit=true
+disposed pixel=0
+COMPLETE

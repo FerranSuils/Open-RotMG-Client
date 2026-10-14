@@ -1,0 +1,20 @@
+Subject: Keep zero-alpha mask pixels transparent
+
+--- a/render/wgpu/shaders/blend/alpha.wgsl
++++ b/render/wgpu/shaders/blend/alpha.wgsl
+@@ -23,14 +23,5 @@
+     // src is the pixel that we want to apply
+     var src: vec4<f32> = textureSample(current_texture, texture_sampler, in.uv);
+ 
+-    if (src.a > 0.0) {
+-        return vec4<f32>(dst.rgb * src.a, src.a * dst.a);
+-    } else {
+-        if (true) {
+-            // This needs to be in a branch because... reasons. Bug in naga.
+-            // https://github.com/gfx-rs/naga/issues/2168
+-            discard;
+-        }
+-        return dst;
+-    }
++    return vec4<f32>(dst.rgb * src.a, src.a * dst.a);
+ }

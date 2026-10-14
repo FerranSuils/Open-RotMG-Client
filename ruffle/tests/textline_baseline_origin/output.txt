@@ -1,0 +1,8 @@
+size=10 y=130 top=122 bottom=132 height=10
+above=true below=false
+size=20 y=130 top=114 bottom=134 height=20
+above=true below=false
+size=40 y=130 top=98 bottom=138 height=40
+above=true below=false
+scaled top=248 bottom=288
+chat top=528 bottom=596 height=68

@@ -1,0 +1,68 @@
+Subject: Align TextLine rendering and bounds to its baseline
+
+--- a/core/src/display_object/text_line.rs
++++ b/core/src/display_object/text_line.rs
+@@ -19,6 +19,7 @@
+ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_common::utils::HasPrefixField;
++use ruffle_render::transform::Transform;
+ use std::cell::Cell;
+ use std::sync::Arc;
+ use swf::Twips;
+@@ -292,11 +293,21 @@
+     fn replace_with(self, _context: &mut UpdateContext<'gc>, _id: CharacterId) {}
+ 
+     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
++        // TextLine's origin is its baseline, unlike the backing TextField's top edge.
++        context.transform_stack.push(&Transform {
++            matrix: Matrix::translate(Twips::ZERO, -Twips::from_pixels(self.metrics().0)),
++            ..Default::default()
++        });
+         self.0.fallback.render_self(context);
++        context.transform_stack.pop();
+     }
+ 
+     fn self_bounds(self, mode: BoundsMode) -> Rectangle<Twips> {
+-        self.0.fallback.self_bounds(mode)
++        let mut bounds = self.0.fallback.self_bounds(mode);
++        let ascent = Twips::from_pixels(self.metrics().0);
++        bounds.y_min -= ascent;
++        bounds.y_max -= ascent;
++        bounds
+     }
+ 
+     fn hit_test_shape(
+--- a/core/src/display_object/edit_text.rs
++++ b/core/src/display_object/edit_text.rs
+@@ -778,9 +778,14 @@
+     /// coordinate space into this object's local space.
+     fn layout_to_local_matrix(self) -> Matrix {
+         let bounds = self.0.bounds.get();
++        let gutter = if self.is_fte() {
++            Twips::ZERO
++        } else {
++            Self::GUTTER
++        };
+         let matrix = Matrix::translate(
+-            bounds.x_min + Self::GUTTER - Twips::from_pixels(self.0.hscroll.get()),
+-            bounds.y_min + Self::GUTTER - self.0.vertical_scroll_offset(),
++            bounds.x_min + gutter - Twips::from_pixels(self.0.hscroll.get()),
++            bounds.y_min + gutter - self.0.vertical_scroll_offset(),
+         );
+ 
+         if self.font_type() == FontType::Device {
+@@ -2743,7 +2748,12 @@
+ 
+         context.commands.push_mask();
+ 
+-        let mask_bounds = self.0.bounds.get().grow_x(-Self::GUTTER);
++        let gutter = if self.is_fte() {
++            Twips::ZERO
++        } else {
++            Self::GUTTER
++        };
++        let mask_bounds = self.0.bounds.get().grow_x(-gutter);
+         let mask = Matrix::create_box_from_rectangle(&mask_bounds);
+ 
+         context.commands.draw_rect(

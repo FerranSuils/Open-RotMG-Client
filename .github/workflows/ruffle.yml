@@ -1,0 +1,72 @@
+name: Patched Ruffle
+on:
+  push:
+    branches: [main]
+    tags: ['ruffle-*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -v
+  build:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read toolchain and release pins
+        id: pins
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          p=json.load(open('ruffle/lock.json'))
+          print('rust='+p['rustVersion'])
+          print('bindgen='+p['wasmBindgenVersion'])
+          print('version='+p['version'])
+          PY
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pins.outputs.rust }}
+          components: rust-src
+          targets: wasm32-unknown-unknown
+      - name: Install verified wasm-bindgen CLI
+        env:
+          VERSION: ${{ steps.pins.outputs.bindgen }}
+        run: |
+          curl --fail --location --retry 2 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$VERSION/wasm-bindgen-$VERSION-x86_64-unknown-linux-musl.tar.gz" -o bindgen.tar.gz
+          echo '61d4a7dc85acfa0d2354ccc0b8361928c7e52a746d17f28ebaa795ed3dc1614a  bindgen.tar.gz' | sha256sum --check
+          tar -xzf bindgen.tar.gz
+          echo "$PWD/wasm-bindgen-$VERSION-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Build both variants and run Flash-reference tests
+        run: python3 scripts/build_ruffle.py --work-dir "$RUNNER_TEMP/ruffle-build" --output "$PWD/ruffle-${{ steps.pins.outputs.version }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patched-ruffle
+          path: ruffle-${{ steps.pins.outputs.version }}.zip
+      - name: Stage immutable release for qualification
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pins.outputs.version }}
+        run: |
+          test "$GITHUB_REF_NAME" = "ruffle-$VERSION"
+          gh release create "$GITHUB_REF_NAME" "ruffle-$VERSION.zip" --verify-tag --draft --title "Ruffle $VERSION" --notes 'Pinned Ruffle with the client source patches. See the bundle provenance and versioned patches.'
