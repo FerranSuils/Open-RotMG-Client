@@ -1,5 +1,5 @@
 {
-  "version": "0.7.1-openrotmg.1",
+  "version": "0.7.1-openrotmg.2",
   "sourceCommit": "89a7049965f3090e706265670df309a5128233ac",
   "sourceSha256": "246d02cc1211e4f2cfae8b34e672f49679738eaffd5a72999f4828d925668d9a",
   "rustVersion": "1.99.0",
