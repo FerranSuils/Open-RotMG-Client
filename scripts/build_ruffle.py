@@ -49,7 +49,7 @@ def build(work, output):
         print('+ ' + ' '.join(command), flush=True)
         subprocess.run(command, cwd=cwd, env=env | (extra or {}), check=True)
     run(['npm', 'ci', '--no-audit', '--no-fund'], web)
-    for test in ['textline_', 'openrotmg_bitmap_compat']:
+    for test in ['textline_', 'openrotmg_bitmap_compat', 'openrotmg_focus_activation']:
         run(['cargo', 'test', '--locked', '-p', 'tests', '--features', 'imgtests', '--test', 'tests', test, '--', '--test-threads', '4'])
     dist = web / 'packages/core/dist'
     dist.mkdir(parents=True, exist_ok=True)

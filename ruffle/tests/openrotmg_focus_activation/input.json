@@ -1,0 +1,9 @@
+[
+  {"type":"Wait"},
+  {"type":"FocusGained"},
+  {"type":"FocusLost"},
+  {"type":"FocusGained"},
+  {"type":"Wait"},
+  {"type":"FocusLost"},
+  {"type":"Wait"}
+]
