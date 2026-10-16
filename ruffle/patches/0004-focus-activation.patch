@@ -1,0 +1,230 @@
+diff --git a/core/src/avm2.rs b/core/src/avm2.rs
+index 8937f78..6389bec 100644
+--- a/core/src/avm2.rs
++++ b/core/src/avm2.rs
+@@ -106,8 +106,14 @@ use self::api_version::ApiVersion;
+ use self::object::WeakObject;
+ use self::scope::Scope;
+ 
+-const BROADCAST_WHITELIST: [&[u8]; 4] =
+-    [b"enterFrame", b"exitFrame", b"frameConstructed", b"render"];
++const BROADCAST_WHITELIST: [&[u8]; 6] = [
++    b"activate",
++    b"deactivate",
++    b"enterFrame",
++    b"exitFrame",
++    b"frameConstructed",
++    b"render",
++];
+ 
+ /// The state of an AVM2 interpreter.
+ #[derive(Collect)]
+@@ -400,7 +406,7 @@ impl<'gc> Avm2<'gc> {
+ 
+     /// Dispatch an event on all objects in the current execution list.
+     ///
+-    /// `on_type` specifies a class or interface constructor whose instances,
++    /// `on_type` specifies a class or interface definition whose instances,
+     /// implementers, and/or subclasses define the set of objects that will
+     /// receive the event. You can broadcast to just display objects, or
+     /// specific interfaces, and so on.
+@@ -412,7 +418,7 @@ impl<'gc> Avm2<'gc> {
+     pub fn broadcast_event(
+         context: &mut UpdateContext<'gc>,
+         event: EventObject<'gc>,
+-        on_type: ClassObject<'gc>,
++        on_type: Class<'gc>,
+     ) {
+         let event_name = event.event().event_type();
+ 
+@@ -437,7 +443,7 @@ impl<'gc> Avm2<'gc> {
+                 .copied();
+ 
+             if let Some(object) = object.and_then(|obj| obj.upgrade(context.gc()))
+-                && object.is_of_type(on_type.inner_class_definition())
++                && object.is_of_type(on_type)
+             {
+                 let mut activation = Activation::from_nothing(context);
+ 
+diff --git a/core/src/display_object/stage.rs b/core/src/display_object/stage.rs
+index 8eecdd8..2adf11c 100644
+--- a/core/src/display_object/stage.rs
++++ b/core/src/display_object/stage.rs
+@@ -752,7 +752,7 @@ impl<'gc> Stage<'gc> {
+     pub fn broadcast_render(self, context: &mut UpdateContext<'gc>) {
+         let render_evt = Avm2EventObject::bare_default_event(context, "render");
+         let dobject_constr = context.avm2.classes().display_object;
+-        Avm2::broadcast_event(context, render_evt, dobject_constr);
++        Avm2::broadcast_event(context, render_evt, dobject_constr.inner_class_definition());
+ 
+         self.set_invalidated(false);
+     }
+diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
+index 91bdb52..4c3667d 100644
+--- a/core/src/frame_lifecycle.rs
++++ b/core/src/frame_lifecycle.rs
+@@ -177,21 +177,33 @@ pub fn run_inner_goto_frame<'gc>(
+ pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
+     let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
+     let dobject_constr = context.avm2.classes().display_object;
+-    Avm2::broadcast_event(context, enter_frame_evt, dobject_constr);
++    Avm2::broadcast_event(
++        context,
++        enter_frame_evt,
++        dobject_constr.inner_class_definition(),
++    );
+ }
+ 
+ /// Broadcast a `frameConstructed` event to all `DisplayObject`s.
+ pub fn broadcast_frame_constructed<'gc>(context: &mut UpdateContext<'gc>) {
+     let frame_constructed_evt = EventObject::bare_default_event(context, "frameConstructed");
+     let dobject_constr = context.avm2.classes().display_object;
+-    Avm2::broadcast_event(context, frame_constructed_evt, dobject_constr);
++    Avm2::broadcast_event(
++        context,
++        frame_constructed_evt,
++        dobject_constr.inner_class_definition(),
++    );
+ }
+ 
+ /// Broadcast a `exitFrame` event to all `DisplayObject`s.
+ pub fn broadcast_frame_exited<'gc>(context: &mut UpdateContext<'gc>) {
+     let exit_frame_evt = EventObject::bare_default_event(context, "exitFrame");
+     let dobject_constr = context.avm2.classes().display_object;
+-    Avm2::broadcast_event(context, exit_frame_evt, dobject_constr);
++    Avm2::broadcast_event(
++        context,
++        exit_frame_evt,
++        dobject_constr.inner_class_definition(),
++    );
+ 
+     LoadManager::run_exit_frame(context);
+ }
+diff --git a/core/src/player.rs b/core/src/player.rs
+index 675ef3a..e34c7cf 100644
+--- a/core/src/player.rs
++++ b/core/src/player.rs
+@@ -1061,12 +1061,19 @@ impl Player {
+     }
+ 
+     fn handle_focus_event(&mut self, event: PlayerEvent) -> bool {
+-        if let PlayerEvent::FocusLost = event {
+-            self.mutate_with_update_context(|context| {
++        let lost = matches!(event, PlayerEvent::FocusLost);
++        self.mutate_with_update_context(|context| {
++            if lost {
+                 let focus_tracker = context.focus_tracker;
+                 focus_tracker.reset_focus(context);
+-            });
+-        }
++            }
++            let event = Avm2EventObject::bare_default_event(
++                context,
++                if lost { "deactivate" } else { "activate" },
++            );
++            let display_object = context.avm2.class_defs().display_object;
++            Avm2::broadcast_event(context, event, display_object);
++        });
+ 
+         true
+     }
+diff --git a/web/src/lib.rs b/web/src/lib.rs
+index 87d6f01..e47ac4c 100644
+--- a/web/src/lib.rs
++++ b/web/src/lib.rs
+@@ -139,6 +139,8 @@ struct RuffleInstance {
+     pagehide_callback: Option<JsCallback<PageTransitionEvent>>,
+     focusin_callback: Option<JsCallback<FocusEvent>>,
+     focusout_callback: Option<JsCallback<FocusEvent>>,
++    window_focus_callback: Option<JsCallback<FocusEvent>>,
++    window_blur_callback: Option<JsCallback<FocusEvent>>,
+     focus_on_press_callback: Option<JsCallback<PointerEvent>>,
+     webglcontextlost_callback: Option<JsCallback<WebGlContextEvent>>,
+     has_focus: bool,
+@@ -566,6 +568,8 @@ impl RuffleHandle {
+             pagehide_callback: None,
+             focusin_callback: None,
+             focusout_callback: None,
++            window_focus_callback: None,
++            window_blur_callback: None,
+             focus_on_press_callback: None,
+             webglcontextlost_callback: None,
+             timestamp: None,
+@@ -907,6 +911,22 @@ impl RuffleHandle {
+             .and_then(|el| el.dyn_into::<HtmlElement>().ok())
+     }
+ 
++    fn set_focus(ruffle: RuffleHandle, focused: bool) {
++        let _ = ruffle.with_instance_mut(|instance| {
++            if instance.has_focus == focused {
++                return;
++            }
++            instance.has_focus = focused;
++            let _ = instance.with_core_mut(|core| {
++                core.handle_event(if focused {
++                    PlayerEvent::FocusGained
++                } else {
++                    PlayerEvent::FocusLost
++                });
++            });
++        });
++    }
++
+     fn set_up_focus_management(
+         ruffle: RuffleHandle,
+         focus_target: HtmlElement,
+@@ -926,14 +946,7 @@ impl RuffleHandle {
+                         }
+                     }
+ 
+-                    let _ = ruffle.with_instance_mut(|instance| {
+-                        if !instance.has_focus {
+-                            instance.has_focus = true;
+-                            let _ = instance.with_core_mut(|core| {
+-                                core.handle_event(PlayerEvent::FocusGained);
+-                            });
+-                        }
+-                    });
++                    Self::set_focus(ruffle, true);
+                 },
+             ));
+ 
+@@ -951,14 +964,30 @@ impl RuffleHandle {
+                         }
+                     }
+ 
+-                    let _ = ruffle.with_instance_mut(|instance| {
+-                        if instance.has_focus {
+-                            let _ = instance.with_core_mut(|core| {
+-                                core.handle_event(PlayerEvent::FocusLost);
+-                            });
+-                            instance.has_focus = false;
+-                        }
+-                    });
++                    Self::set_focus(ruffle, false);
++                },
++            ));
++
++            let window =
++                web_sys::window().expect("Ruffle focus management requires a browser window");
++            instance.window_blur_callback = Some(JsCallback::register(
++                &window,
++                "blur",
++                false,
++                move |_: FocusEvent| Self::set_focus(ruffle, false),
++            ));
++            let focus_target_clone = focus_target.clone();
++            instance.window_focus_callback = Some(JsCallback::register(
++                &window,
++                "focus",
++                false,
++                move |_: FocusEvent| {
++                    if focus_target_clone
++                        .matches(":focus-within")
++                        .expect("Unable to inspect Ruffle focus ownership")
++                    {
++                        Self::set_focus(ruffle, true);
++                    }
+                 },
+             ));
+ 

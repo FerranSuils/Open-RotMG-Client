@@ -1,0 +1,13 @@
+ready
+stage activate true false false 2
+orphan activate true false false 2
+root activate true false false 2
+stage deactivate true false false 2
+orphan deactivate true false false 2
+root deactivate true false false 2
+stage activate true false false 2
+orphan activate true false false 2
+root activate true false false 2
+stage deactivate true false false 2
+orphan deactivate true false false 2
+root deactivate true false false 2
