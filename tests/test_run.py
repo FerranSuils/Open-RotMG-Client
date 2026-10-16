@@ -60,7 +60,7 @@ class ClientRoutingTests(unittest.TestCase):
                     url = f"{origin}/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), url)
             for protocol in ["http", "https"]:
-                for path in ["char/list", "char/fame", "account/register", "account/verify", "fame/list"]:
+                for path in ["char/list", "char/fame", "account/register", "account/verify", "fame/list", "guild/listMembers", "guild/getBoard", "guild/setBoard"]:
                     url = f"{protocol}://127.0.0.1:8080/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), origin + "/legacy-api/" + path)
         for foreign in ["https://127.0.0.1.evil.example:8080/char/list", "http://127.0.0.1:8080/accounting/report", "http://127.0.0.1:8080/credits/buy"]:
