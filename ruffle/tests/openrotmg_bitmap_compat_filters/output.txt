@@ -1,0 +1,8 @@
+cold=ff363636
+repeat=ff363636
+transformed clip=ff363636
+outside clip=0
+changed filter=ff556677
+removed filter=ffffcc00
+grown bounds=true
+outside glow=0

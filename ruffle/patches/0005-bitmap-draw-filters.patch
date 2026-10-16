@@ -1,0 +1,278 @@
+Subject: Preserve filtered child artwork in BitmapData.draw snapshots
+
+diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
+index 4db9211..bfd45ab 100644
+--- a/core/src/bitmap/operations.rs
++++ b/core/src/bitmap/operations.rs
+@@ -1383,7 +1383,12 @@ pub fn draw<'gc>(
+     quality: StageQuality,
+ ) -> Result<(), BitmapDataDrawError> {
+     // Calculate the maximum potential area that this draw call will affect
+-    let bounds = transform.matrix * source.bounds();
++    let bounds = match &source {
++        IBitmapDrawable::DisplayObject(object) => {
++            object.render_bounds_with_transform(&transform.matrix, true, &Matrix::IDENTITY)
++        }
++        IBitmapDrawable::BitmapData(_) => transform.matrix * source.bounds(),
++    };
+     let mut dirty_region = PixelRegion::from(bounds);
+     dirty_region.clamp(target.width(), target.height());
+     if dirty_region.width() == 0 || dirty_region.height() == 0 {
+@@ -1549,10 +1554,7 @@ pub fn draw<'gc>(
+         dirty_region.union(old);
+     }
+ 
+-    assert!(
+-        cache_draws.is_empty(),
+-        "BitmapData.draw() should not use cacheAsBitmap"
+-    );
++    context.renderer.render_bitmap_cache(cache_draws, quality);
+     let image = context
+         .renderer
+         .render_offscreen(handle, commands, quality, dirty_region);
+diff --git a/core/src/display_object.rs b/core/src/display_object.rs
+index 64e3a32..a71050a 100644
+--- a/core/src/display_object.rs
++++ b/core/src/display_object.rs
+@@ -980,20 +980,36 @@ pub fn render_base<'gc>(
+         None
+     };
+ 
+-    let cache_info = if context.use_bitmap_cache && this.is_bitmap_cached() {
++    let cache_info = if this.is_bitmap_cached()
++        && (context.use_bitmap_cache || !this.filters().is_empty())
++    {
+         let mut cache_info: Option<DrawCacheInfo> = None;
+         let base_transform = context.transform_stack.transform();
++        let filter_matrix = if context.use_bitmap_cache {
++            context.stage.view_matrix()
++        } else {
++            Matrix::IDENTITY
++        };
+         let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
+             &base_transform.matrix,
+             false, // we want to do the filter growth for this object ourselves, to know the offsets
+-            &context.stage.view_matrix(),
++            &filter_matrix,
+         );
+         let name = this.name();
+         let mut filters: Vec<Filter> = this.filters().to_owned();
+         let swf_version = this.swf_version();
+         filters.retain(|f| !f.impotent());
+ 
+-        if let Some(cache) = &mut *this.base().bitmap_cache_mut() {
++        // Snapshots must not reuse or replace stage caches at a different scale/quality.
++        let mut temporary_cache = Some(BitmapCache::default());
++        let base = this.base();
++        let mut stage_cache = base.bitmap_cache_mut();
++        let cache = if context.use_bitmap_cache {
++            &mut *stage_cache
++        } else {
++            &mut temporary_cache
++        };
++        if let Some(cache) = cache {
+             let width = bounds.width().to_pixels().ceil().max(0.0);
+             let height = bounds.height().to_pixels().ceil().max(0.0);
+             if width <= u16::MAX as f64 && height <= u16::MAX as f64 {
+@@ -1005,10 +1021,9 @@ pub fn render_base<'gc>(
+                     y_min: Twips::ZERO,
+                     y_max: Twips::from_pixels_i32(height as i32),
+                 };
+-                let stage_matrix = context.stage.view_matrix();
+                 for filter in &mut filters {
+-                    // Scaling is done by *stage view matrix* only, nothing in-between
+-                    filter.scale(stage_matrix.a, stage_matrix.d);
++                    // Scaling is done by the destination's view matrix, not intermediate transforms.
++                    filter.scale(filter_matrix.a, filter_matrix.d);
+                     filter_rect = filter.calculate_dest_rect(filter_rect);
+                 }
+                 let filter_rect = Rectangle {
+@@ -1095,7 +1110,7 @@ pub fn render_base<'gc>(
+                 ui: context.ui,
+                 transform_stack: &mut transform_stack,
+                 is_offscreen: true,
+-                use_bitmap_cache: true,
++                use_bitmap_cache: context.use_bitmap_cache,
+                 stage: context.stage,
+             };
+             this.render_self(&mut offscreen_context);
+diff --git a/render/canvas/src/lib.rs b/render/canvas/src/lib.rs
+index 11d5425..55a4042 100644
+--- a/render/canvas/src/lib.rs
++++ b/render/canvas/src/lib.rs
+@@ -514,6 +514,16 @@ impl RenderBackend for WebCanvasRenderBackend {
+         None
+     }
+ 
++    fn render_bitmap_cache(
++        &mut self,
++        cache_entries: Vec<BitmapCacheEntry>,
++        _quality: StageQuality,
++    ) {
++        if !cache_entries.is_empty() {
++            panic!("Bitmap caching is unavailable on the canvas backend");
++        }
++    }
++
+     fn submit_frame(
+         &mut self,
+         clear: Color,
+diff --git a/render/src/backend.rs b/render/src/backend.rs
+index 0200a46..7e65a09 100644
+--- a/render/src/backend.rs
++++ b/render/src/backend.rs
+@@ -80,6 +80,9 @@ pub trait RenderBackend: Any {
+         false
+     }
+ 
++    /// Offscreen draws need current filtered textures without presenting the stage.
++    fn render_bitmap_cache(&mut self, cache_entries: Vec<BitmapCacheEntry>, _quality: StageQuality);
++
+     fn submit_frame(
+         &mut self,
+         clear: swf::Color,
+diff --git a/render/src/backend/null.rs b/render/src/backend/null.rs
+index c8856dd..d5cef8f 100644
+--- a/render/src/backend/null.rs
++++ b/render/src/backend/null.rs
+@@ -73,6 +73,13 @@ impl RenderBackend for NullRenderer {
+         None
+     }
+ 
++    fn render_bitmap_cache(
++        &mut self,
++        _cache_entries: Vec<BitmapCacheEntry>,
++        _quality: StageQuality,
++    ) {
++    }
++
+     fn submit_frame(
+         &mut self,
+         _clear: Color,
+diff --git a/render/src/bitmap/atlas.rs b/render/src/bitmap/atlas.rs
+index 5fa4ed3..3582ce5 100644
+--- a/render/src/bitmap/atlas.rs
++++ b/render/src/bitmap/atlas.rs
+@@ -271,6 +271,13 @@ mod test {
+         ) -> Option<Box<dyn SyncHandle>> {
+             unimplemented!()
+         }
++        fn render_bitmap_cache(
++            &mut self,
++            _cache_entries: Vec<BitmapCacheEntry>,
++            _quality: StageQuality,
++        ) {
++            unimplemented!()
++        }
+         fn submit_frame(
+             &mut self,
+             _clear: Color,
+diff --git a/render/webgl/src/lib.rs b/render/webgl/src/lib.rs
+index 925bf8d..510d0e4 100644
+--- a/render/webgl/src/lib.rs
++++ b/render/webgl/src/lib.rs
+@@ -1068,6 +1068,16 @@ impl RenderBackend for WebGlRenderBackend {
+         ShapeHandle(Arc::new(mesh))
+     }
+ 
++    fn render_bitmap_cache(
++        &mut self,
++        cache_entries: Vec<BitmapCacheEntry>,
++        _quality: StageQuality,
++    ) {
++        if !cache_entries.is_empty() {
++            panic!("Bitmap caching is unavailable on the webgl backend");
++        }
++    }
++
+     fn submit_frame(
+         &mut self,
+         clear: Color,
+diff --git a/render/wgpu/src/backend.rs b/render/wgpu/src/backend.rs
+index 5dcf43c..d43c6f5 100644
+--- a/render/wgpu/src/backend.rs
++++ b/render/wgpu/src/backend.rs
+@@ -543,27 +543,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
+     }
+ 
+     #[instrument(level = "debug", skip_all)]
+-    fn submit_frame(
+-        &mut self,
+-        clear: Color,
+-        commands: CommandList,
+-        cache_entries: Vec<BitmapCacheEntry>,
+-    ) {
+-        let Some(frame_output) = self.target.get_next_texture() else {
+-            // Attempt to recreate the swap chain in this case.
+-            self.target.resize(
+-                &self.descriptors.device,
+-                self.target.width(),
+-                self.target.height(),
+-            );
+-            return;
+-        };
+-
++    fn render_bitmap_cache(&mut self, cache_entries: Vec<BitmapCacheEntry>, quality: StageQuality) {
+         for entry in cache_entries {
+             let texture = as_texture(&entry.handle);
+             let surface = Surface::new(
+                 &self.descriptors,
+-                self.surface.quality(),
++                quality,
+                 texture.texture.width(),
+                 texture.texture.height(),
+                 wgpu::TextureFormat::Rgba8Unorm,
+@@ -642,6 +627,25 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
+             // but its hundreds of children each have their own bitmap caches).
+             self.active_frame.maybe_flush(&self.descriptors);
+         }
++    }
++
++    fn submit_frame(
++        &mut self,
++        clear: Color,
++        commands: CommandList,
++        cache_entries: Vec<BitmapCacheEntry>,
++    ) {
++        let Some(frame_output) = self.target.get_next_texture() else {
++            // Attempt to recreate the swap chain in this case.
++            self.target.resize(
++                &self.descriptors.device,
++                self.target.width(),
++                self.target.height(),
++            );
++            return;
++        };
++
++        self.render_bitmap_cache(cache_entries, self.surface.quality());
+ 
+         self.surface.draw_commands_and_copy_to(
+             frame_output.view(),
+diff --git a/tests/tests/swfs/avm2/bitmapdata_draw_filters/output.ruffle.png b/tests/tests/swfs/avm2/bitmapdata_draw_filters/output.ruffle.png
+deleted file mode 100644
+index 970a9e84f29c1e3931a08e2b63296fa7814b06f9..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 792
+zcmeAS@N?(olHy`uVBq!ia0vp^CxAGGgAGU?ZmZ{JU|_oM>Eakt!T9z7^8%H~X~#bP
+zFMrp2;>_|Q@8os4x3@u2X3xB7UhC%>87sZ}S++f^YFWE=_SN-Lv;Vud{Fr~nEc|c3
+z<I`2E*Ht;Lh$+1qs?RZX^}1cJSQi#u4GrI`5CUYc5^p&b8Xo(#DPZTTRjcC!w8CRc
+zuW~z4QPcmzNB_k?%XiS&8v1#Ne47+O0sg#uphM#S<1?ZE)94fXxB}~+V89N}zJg5~
+R4*^p=gQu&X%Q~loCIHm|iW~p{
+
+diff --git a/tests/tests/swfs/avm2/bitmapdata_draw_filters/test.toml b/tests/tests/swfs/avm2/bitmapdata_draw_filters/test.toml
+index aed575c..5a1c8ee 100644
+--- a/tests/tests/swfs/avm2/bitmapdata_draw_filters/test.toml
++++ b/tests/tests/swfs/avm2/bitmapdata_draw_filters/test.toml
+@@ -1,9 +1,6 @@
+ num_ticks = 1
+ 
+ [image_comparisons.output]
+-# FIXME Ruffle does not use CAB in BitmapData.draw
+-known_failure = true
+-
+ tolerance = 0
+ 
+ [player_options]
