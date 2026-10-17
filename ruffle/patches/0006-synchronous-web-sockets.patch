@@ -1,0 +1,474 @@
+--- a/core/src/socket.rs
++++ b/core/src/socket.rs
+@@ -33,14 +33,17 @@
+ struct Socket<'gc> {
+     target: SocketKind<'gc>,
+     sender: RefCell<Sender<Vec<u8>>>,
++    #[collect(require_static)]
++    output: SocketOutput,
+     connected: Cell<bool>,
+ }
+ 
+ impl<'gc> Socket<'gc> {
+-    fn new(target: SocketKind<'gc>, sender: Sender<Vec<u8>>) -> Self {
++    fn new(target: SocketKind<'gc>, sender: Sender<Vec<u8>>, output: SocketOutput) -> Self {
+         Self {
+             target,
+             sender: RefCell::new(sender),
++            output,
+             connected: Cell::new(false),
+         }
+     }
+@@ -60,6 +63,19 @@
+     Close(SocketHandle),
+ }
+ 
++pub enum SocketOutput {
++    Channel,
++    Direct(Box<dyn FnMut(Vec<u8>) -> Result<(), String>>),
++}
++impl SocketOutput {
++    fn send(&mut self, channel: &Sender<Vec<u8>>, data: Vec<u8>) -> Result<(), String> {
++        match self {
++            Self::Channel => channel.try_send(data).map_err(|e| e.to_string()),
++            Self::Direct(send) => send(data),
++        }
++    }
++}
++
+ /// Manages the collection of Sockets.
+ #[derive(Collect)]
+ #[collect(no_drop)]
+@@ -92,18 +108,18 @@
+     ) {
+         let (sender, receiver) = unbounded();
+ 
+-        let socket = Socket::new(SocketKind::Avm2(target), sender);
+-        let handle = self.sockets.insert(socket);
+-
+-        // NOTE: This call will send SocketAction::Connect to sender with connection status.
+-        backend.connect_socket(
+-            sanitize_host(&host).to_string(),
+-            port,
+-            Duration::from_millis(target.timeout().into()),
+-            handle,
+-            receiver,
+-            self.sender.clone(),
+-        );
++        let actions = self.sender.clone();
++        let handle = self.sockets.insert_with_key(|handle| {
++            let output = backend.connect_socket(
++                sanitize_host(&host).to_string(),
++                port,
++                Duration::from_millis(target.timeout().into()),
++                handle,
++                receiver,
++                actions,
++            );
++            Socket::new(SocketKind::Avm2(target), sender, output)
++        });
+ 
+         if let Some(existing_handle) = target.set_handle(handle) {
+             // As written in the AS3 docs, we are supposed to close the existing connection,
+@@ -126,18 +142,18 @@
+             None => return,
+         };
+ 
+-        let socket = Socket::new(SocketKind::Avm1(target), sender);
+-        let handle = self.sockets.insert(socket);
+-
+-        // NOTE: This call will send SocketAction::Connect to sender with connection status.
+-        backend.connect_socket(
+-            sanitize_host(&host).to_string(),
+-            port,
+-            Duration::from_millis(xml_socket.timeout().into()),
+-            handle,
+-            receiver,
+-            self.sender.clone(),
+-        );
++        let actions = self.sender.clone();
++        let handle = self.sockets.insert_with_key(|handle| {
++            let output = backend.connect_socket(
++                sanitize_host(&host).to_string(),
++                port,
++                Duration::from_millis(xml_socket.timeout().into()),
++                handle,
++                receiver,
++                actions,
++            );
++            Socket::new(SocketKind::Avm1(target), sender, output)
++        });
+ 
+         if let Some(existing_handle) = xml_socket.set_handle(handle) {
+             // NOTE: AS2 docs don't specify what happens when connect is called with open connection,
+@@ -155,10 +171,8 @@
+     }
+ 
+     pub fn send(&mut self, handle: SocketHandle, data: Vec<u8>) {
+-        if let Some(Socket { sender, .. }) = self.sockets.get_mut(handle) {
+-            // We use an unbounded socket, so this should only ever error if the channel is closed
+-            // (the receiver was dropped)
+-            if let Err(e) = sender.borrow().try_send(data) {
++        if let Some(Socket { sender, output, .. }) = self.sockets.get_mut(handle) {
++            if let Err(e) = output.send(&sender.borrow(), data) {
+                 tracing::error!("Failed to send data to socket: {:?}", e);
+             }
+         }
+@@ -181,8 +195,10 @@
+             sender,
+             target,
+             connected: _,
++            output,
+         } = socket;
+ 
++        drop(output);
+         drop(sender); // NOTE: By dropping the sender, the reading task will close automatically.
+ 
+         // Clear the buffers if the connection was closed.
+@@ -406,7 +422,32 @@
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::sanitize_host;
++    use super::{SocketOutput, sanitize_host};
++
++    #[test]
++    fn direct_output_flushes_before_an_executor_turn_and_channel_output_stays_fifo() {
++        let (tx, rx) = async_channel::unbounded();
++        let bytes = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
++        let captured = bytes.clone();
++        let mut direct = SocketOutput::Direct(Box::new(move |data| {
++            captured.borrow_mut().push(data);
++            Ok(())
++        }));
++        direct.send(&tx, vec![1, 2]).unwrap();
++        assert_eq!(*bytes.borrow(), vec![vec![1, 2]]);
++        assert!(rx.is_empty());
++        let mut channel = SocketOutput::Channel;
++        for n in 0..3 {
++            channel.send(&tx, vec![n]).unwrap();
++        }
++        for n in 0..3 {
++            assert_eq!(rx.try_recv().unwrap(), vec![n]);
++        }
++        drop(rx);
++        assert!(channel.send(&tx, vec![4]).is_err());
++        let mut failed = SocketOutput::Direct(Box::new(|_| Err("closed transport".into())));
++        assert_eq!(failed.send(&tx, vec![5]), Err("closed transport".into()));
++    }
+ 
+     #[test]
+     fn truncate_host_at_null() {
+--- a/core/src/backend/navigator.rs
++++ b/core/src/backend/navigator.rs
+@@ -1,7 +1,7 @@
+ //! Browser-related platform functions
+ 
+ use crate::loader::Error;
+-use crate::socket::{ConnectionState, SocketAction, SocketHandle};
++use crate::socket::{ConnectionState, SocketAction, SocketHandle, SocketOutput};
+ use crate::string::WStr;
+ use async_channel::{Receiver, Sender};
+ use encoding_rs::Encoding;
+@@ -348,7 +348,7 @@
+         handle: SocketHandle,
+         receiver: Receiver<Vec<u8>>,
+         sender: Sender<SocketAction>,
+-    );
++    ) -> SocketOutput;
+ }
+ 
+ #[cfg(not(target_family = "wasm"))]
+@@ -487,10 +487,11 @@
+         handle: SocketHandle,
+         _receiver: Receiver<Vec<u8>>,
+         sender: Sender<SocketAction>,
+-    ) {
++    ) -> SocketOutput {
+         sender
+             .try_send(SocketAction::Connect(handle, ConnectionState::Failed))
+             .expect("working channel send");
++        SocketOutput::Channel
+     }
+ }
+ 
+--- a/web/src/navigator.rs
++++ b/web/src/navigator.rs
+@@ -1,9 +1,6 @@
+ //! Navigator backend for web
+ use crate::SocketProxy;
+ use async_channel::{Receiver, Sender};
+-use futures_util::future::Either;
+-use futures_util::{SinkExt, StreamExt, future};
+-use gloo_net::websocket::{Message, futures::WebSocket};
+ use js_sys::{Array, Promise, RegExp, Uint8Array};
+ use ruffle_core::Player;
+ use ruffle_core::backend::navigator::{
+@@ -13,7 +10,7 @@
+ use ruffle_core::config::NetworkingAccessMode;
+ use ruffle_core::indexmap::IndexMap;
+ use ruffle_core::loader::Error;
+-use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
++use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle, SocketOutput};
+ use ruffle_core::swf::Encoding;
+ use std::borrow::Cow;
+ use std::cell::RefCell;
+@@ -495,79 +492,145 @@
+         &mut self,
+         host: String,
+         port: u16,
+-        // NOTE: WebSocket does not allow specifying a timeout, so this goes unused.
+         _timeout: Duration,
+         handle: SocketHandle,
+-        receiver: Receiver<Vec<u8>>,
++        _receiver: Receiver<Vec<u8>>,
+         sender: Sender<SocketAction>,
+-    ) {
++    ) -> SocketOutput {
+         let Some(proxy) = self
+             .socket_proxies
+             .iter()
+             .find(|x| x.host == host && x.port == port)
+         else {
+             tracing::warn!("Missing WebSocket proxy for host {}, port {}", host, port);
+-            sender
+-                .try_send(SocketAction::Connect(handle, ConnectionState::Failed))
+-                .expect("working channel send");
+-            return;
++            socket_action(
++                &sender,
++                SocketAction::Connect(handle, ConnectionState::Failed),
++            );
++            return SocketOutput::Channel;
+         };
+-
+         tracing::info!("Connecting to {}", proxy.proxy_url);
++        match DirectWebSocket::new(&proxy.proxy_url, handle, sender.clone()) {
++            Ok(mut socket) => SocketOutput::Direct(Box::new(move |bytes| socket.send(&bytes))),
++            Err(error) => {
++                tracing::error!("Failed to create WebSocket: {error:?}");
++                socket_action(
++                    &sender,
++                    SocketAction::Connect(handle, ConnectionState::Failed),
++                );
++                SocketOutput::Channel
++            }
++        }
++    }
++}
+ 
+-        let ws = match WebSocket::open(&proxy.proxy_url) {
+-            Ok(x) => x,
+-            Err(e) => {
+-                tracing::error!("Failed to create WebSocket, reason {:?}", e);
+-                sender
+-                    .try_send(SocketAction::Connect(handle, ConnectionState::Failed))
+-                    .expect("working channel send");
++fn socket_action(sender: &Sender<SocketAction>, action: SocketAction) {
++    if let Err(error) = sender.try_send(action) {
++        tracing::debug!("Discarding socket event after player shutdown: {error}");
++    }
++}
++
++struct DirectWebSocket {
++    socket: web_sys::WebSocket,
++    listeners: Vec<(
++        &'static str,
++        wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
++    )>,
++    handle: SocketHandle,
++    sender: Sender<SocketAction>,
++}
++impl DirectWebSocket {
++    fn new(
++        url: &str,
++        handle: SocketHandle,
++        sender: Sender<SocketAction>,
++    ) -> Result<Self, wasm_bindgen::JsValue> {
++        let socket = web_sys::WebSocket::new(url)?;
++        socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
++        let mut output = Self {
++            socket,
++            listeners: vec![],
++            handle,
++            sender: sender.clone(),
++        };
++        let connected = Rc::new(std::cell::Cell::new(false));
++        let closed = Rc::new(std::cell::Cell::new(false));
++        let (c, done, tx) = (connected.clone(), closed.clone(), sender.clone());
++        output.listen("open", move |_| {
++            if !done.get() {
++                c.set(true);
++                socket_action(
++                    &tx,
++                    SocketAction::Connect(handle, ConnectionState::Connected),
++                );
++            }
++        })?;
++        let (done, tx) = (closed.clone(), sender.clone());
++        output.listen("message", move |event| {
++            if done.get() {
+                 return;
+             }
+-        };
+-
+-        let (mut ws_write, mut ws_read) = ws.split();
+-        sender
+-            .try_send(SocketAction::Connect(handle, ConnectionState::Connected))
+-            .expect("working channel send");
+-
+-        self.spawn_future(Box::pin(async move {
+-            loop {
+-                match future::select(ws_read.next(), std::pin::pin!(receiver.recv())).await {
+-                    // Handle incoming messages.
+-                    Either::Left((Some(msg), _)) => match msg {
+-                        Ok(Message::Bytes(buf)) => sender
+-                            .try_send(SocketAction::Data(handle, buf))
+-                            .expect("working channel send"),
+-                        Ok(_) => tracing::warn!("Server sent an unexpected text message"),
+-                        Err(_) => {
+-                            sender
+-                                .try_send(SocketAction::Close(handle))
+-                                .expect("working channel send");
+-                            break;
+-                        }
+-                    },
+-                    // Handle outgoing messages.
+-                    Either::Right((Ok(msg), _)) => {
+-                        if let Err(e) = ws_write.send(Message::Bytes(msg)).await {
+-                            tracing::warn!("Failed to send message to WebSocket {}", e);
+-                            sender
+-                                .try_send(SocketAction::Close(handle))
+-                                .expect("working channel send");
+-                        }
+-                    }
+-                    // The connection was closed.
+-                    _ => break,
+-                };
++            let message = event
++                .dyn_into::<web_sys::MessageEvent>()
++                .expect("WebSocket message event");
++            if message.data().is_instance_of::<js_sys::ArrayBuffer>() {
++                socket_action(
++                    &tx,
++                    SocketAction::Data(handle, Uint8Array::new(&message.data()).to_vec()),
++                );
++            } else {
++                tracing::warn!("Server sent an unexpected non-binary WebSocket message");
+             }
+-
+-            let ws = ws_write
+-                .reunite(ws_read)
+-                .expect("both originate from the same websocket");
+-            let _ = ws.close(None, None);
+-
+-            Ok(())
+-        }));
++        })?;
++        for name in ["error", "close"] {
++            let (c, done, tx) = (connected.clone(), closed.clone(), sender.clone());
++            output.listen(name, move |_| {
++                if !done.replace(true) {
++                    let action = if c.get() {
++                        SocketAction::Close(handle)
++                    } else {
++                        SocketAction::Connect(handle, ConnectionState::Failed)
++                    };
++                    socket_action(&tx, action);
++                }
++            })?;
++        }
++        Ok(output)
++    }
++    fn listen(
++        &mut self,
++        name: &'static str,
++        callback: impl FnMut(web_sys::Event) + 'static,
++    ) -> Result<(), wasm_bindgen::JsValue> {
++        let callback = wasm_bindgen::closure::Closure::wrap(
++            Box::new(callback) as Box<dyn FnMut(web_sys::Event)>
++        );
++        self.socket
++            .add_event_listener_with_callback(name, callback.as_ref().unchecked_ref())?;
++        self.listeners.push((name, callback));
++        Ok(())
++    }
++    fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
++        // Flash flushes before returning to script; waiting for a browser task can miss ACK deadlines.
++        self.socket.send_with_u8_array(bytes).map_err(|error| {
++            socket_action(&self.sender, SocketAction::Close(self.handle));
++            format!("WebSocket send failed: {error:?}")
++        })
++    }
++}
++impl Drop for DirectWebSocket {
++    fn drop(&mut self) {
++        for (name, callback) in &self.listeners {
++            if let Err(error) = self
++                .socket
++                .remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref())
++            {
++                tracing::warn!("Failed to remove WebSocket listener: {error:?}");
++            }
++        }
++        if let Err(error) = self.socket.close() {
++            tracing::warn!("Failed to close WebSocket: {error:?}");
++        }
+     }
+ }
+ 
+--- a/frontend-utils/src/backends/navigator.rs
++++ b/frontend-utils/src/backends/navigator.rs
+@@ -12,7 +12,7 @@
+ };
+ use ruffle_core::indexmap::IndexMap;
+ use ruffle_core::loader::Error;
+-use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
++use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle, SocketOutput};
+ use std::collections::HashSet;
+ use std::fs::File;
+ use std::future::Future;
+@@ -308,7 +308,7 @@
+         handle: SocketHandle,
+         receiver: Receiver<Vec<u8>>,
+         sender: Sender<SocketAction>,
+-    ) {
++    ) -> SocketOutput {
+         /// Tries to send the given action properly handling failures.
+         ///
+         /// Returns `true` when the action has been sent properly,
+@@ -468,6 +468,7 @@
+         });
+ 
+         tokio::spawn(future);
++        SocketOutput::Channel
+     }
+ }
+ 
+--- a/tests/framework/src/backends/navigator.rs
++++ b/tests/framework/src/backends/navigator.rs
+@@ -9,7 +9,7 @@
+ };
+ use ruffle_core::indexmap::IndexMap;
+ use ruffle_core::loader::Error;
+-use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
++use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle, SocketOutput};
+ use ruffle_core::swf::Encoding;
+ use ruffle_socket_format::SocketEvent;
+ use std::borrow::Cow;
+@@ -281,7 +281,7 @@
+         handle: SocketHandle,
+         receiver: Receiver<Vec<u8>>,
+         sender: Sender<SocketAction>,
+-    ) {
++    ) -> SocketOutput {
+         if let Some(log) = &self.log {
+             log.avm_trace("Navigator::connect_socket");
+             log.avm_trace(&format!("    Host: {host}; Port: {port}"));
+@@ -325,5 +325,6 @@
+                 Ok(())
+             }));
+         }
++        SocketOutput::Channel
+     }
+ }
