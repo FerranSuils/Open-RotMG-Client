@@ -1,0 +1,71 @@
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -426,7 +426,8 @@
+     use gc_arena::{Collect, Gc, Mutation};
+     use ruffle_render::backend::RenderBackend;
+     use ruffle_render::bitmap::{BitmapHandle, PixelRegion, PixelSnapping};
+-    use ruffle_render::commands::CommandHandler;
++    use ruffle_render::commands::{CommandHandler, CommandList};
++    use ruffle_render::quality::StageQuality;
+     use std::cell::Ref;
+ 
+     use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
+@@ -492,13 +493,9 @@
+             ))
+         }
+ 
+-        /// Clones the underlying data, producing a new `BitmapData`
+-        /// that has no GPU texture or associated display objects
+         pub fn clone_data(&self, renderer: &mut dyn RenderBackend) -> BitmapRawData<'gc> {
+-            // Sync from the GPU to CPU, since our new BitmapData starts out
+-            // with no GPU texture
+-            let data = self.sync(renderer).borrow();
+-            BitmapRawData {
++            let data = self.0.borrow();
++            let mut cloned = BitmapRawData {
+                 pixels: data.pixels.clone(),
+                 width: data.width,
+                 height: data.height,
+@@ -507,11 +504,41 @@
+                 bitmap_handle: None,
+                 avm2_object: None,
+                 display_objects: vec![],
+-                // We have no GPU texture, so there's no need to mark as dirty
+                 dirty_state: DirtyState::Clean,
+                 #[cfg(feature = "egui")]
+                 egui_texture: Default::default(),
++            };
++            if matches!(data.dirty_state, DirtyState::GpuModified(..)) {
++                // Cloning a GPU-written image must not force a synchronous CPU readback.
++                let target = renderer
++                    .create_empty_texture(
++                        data.width
++                            .try_into()
++                            .expect("GPU bitmap clone has zero width"),
++                        data.height
++                            .try_into()
++                            .expect("GPU bitmap clone has zero height"),
++                    )
++                    .expect("GPU bitmap clone texture allocation failed");
++                let region = data.full_region();
++                let mut commands = CommandList::new();
++                commands.render_bitmap(
++                    data.bitmap_handle
++                        .as_ref()
++                        .expect("GPU-dirty bitmap has no texture")
++                        .clone(),
++                    Default::default(),
++                    false,
++                    PixelSnapping::Never,
++                    region,
++                );
++                let sync = renderer
++                    .render_offscreen(target.clone(), commands, StageQuality::Low, region)
++                    .expect("GPU bitmap clone rendering unsupported");
++                cloned.bitmap_handle = Some(target);
++                cloned.dirty_state = DirtyState::GpuModified(sync, region);
+             }
++            cloned
+         }
+ 
+         // Provides access to the underlying `BitmapData`. If a GPU -> CPU sync

@@ -1,0 +1,9 @@
+alpha pixels=true
+transparent outside=true
+metadata=true
+source mutation independent=true
+clone mutation visible=true
+chain independent=true
+source disposal independent=true
+CPU clone independent=true
+opaque preserved=true
