@@ -1,10 +1,10 @@
 {
-  "version": "0.7.1-openrotmg.4",
+  "version": "0.7.1-openrotmg.5",
   "sourceCommit": "89a7049965f3090e706265670df309a5128233ac",
   "sourceSha256": "246d02cc1211e4f2cfae8b34e672f49679738eaffd5a72999f4828d925668d9a",
   "rustVersion": "1.99.0",
   "wasmBindgenVersion": "0.2.127",
-  "buildDate": "2026-10-16T00:00:00.000Z",
+  "buildDate": "2026-10-17T00:00:00.000Z",
   "bundleSha256": "6b8f2b16ab1f7ffab3e713b1392d4dbc99ec47db3ea039982cd8949c359401f0",
   "patches": [
     "0001-alpha-mask.patch",
@@ -13,6 +13,7 @@
     "0004-focus-activation.patch",
     "0005-bitmap-draw-filters.patch",
     "0006-synchronous-web-sockets.patch",
-    "0007-bitmap-gpu-clone.patch"
+    "0007-bitmap-gpu-clone.patch",
+    "0008-wheel-accumulator.patch"
   ]
 }

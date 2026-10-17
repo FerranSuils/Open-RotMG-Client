@@ -1,0 +1,156 @@
+diff --git a/core/src/display_object/interactive.rs b/core/src/display_object/interactive.rs
+index 1cd38a8..a636707 100644
+--- a/core/src/display_object/interactive.rs
++++ b/core/src/display_object/interactive.rs
+@@ -513,18 +513,24 @@ pub trait TInteractiveObject<'gc>:
+             }
+             ClipEvent::MouseWheel { delta } => {
+                 let string_mouse_wheel = istr!("mouseWheel");
++                let delta = activation.context.input.mouse_wheel_delta(delta);
+ 
+                 let avm2_event = Avm2EventObject::mouse_event(
+                     &mut activation,
+                     string_mouse_wheel,
+                     self.as_displayobject(),
+                     None,
+-                    delta.lines() as i32,
++                    delta,
+                     true,
+                     MouseButton::Left,
+                 );
+ 
+-                Avm2::dispatch_event(activation.context, avm2_event, target).into()
++                if delta == 0 {
++                    // Preserve Smart page-scroll handling without delivering a false scroll-down.
++                    Avm2::simulate_event_dispatch(activation.context, avm2_event, target).into()
++                } else {
++                    Avm2::dispatch_event(activation.context, avm2_event, target).into()
++                }
+             }
+             ClipEvent::MouseMoveInside => {
+                 let string_mouse_move = istr!("mouseMove");
+diff --git a/core/src/events.rs b/core/src/events.rs
+index a1f52a7..cce8442 100644
+--- a/core/src/events.rs
++++ b/core/src/events.rs
+@@ -60,6 +60,13 @@ pub enum MouseWheelDelta {
+ impl MouseWheelDelta {
+     const MOUSE_WHEEL_SCALE: f64 = 100.0;
+ 
++    pub fn pixels(self) -> f64 {
++        match self {
++            Self::Lines(delta) => delta * Self::MOUSE_WHEEL_SCALE,
++            Self::Pixels(delta) => delta,
++        }
++    }
++
+     /// Returns the number of lines that this delta represents.
+     pub fn lines(self) -> f64 {
+         // TODO: Should we always return an integer here?
+diff --git a/core/src/input.rs b/core/src/input.rs
+index 922d13e..f317f76 100644
+--- a/core/src/input.rs
++++ b/core/src/input.rs
+@@ -4,6 +4,7 @@ use crate::events::{
+ };
+ use chrono::{DateTime, TimeDelta, Utc};
+ use enumset::EnumSet;
++use std::cell::Cell;
+ use std::collections::{HashMap, HashSet};
+ 
+ pub enum KeyCodeMappingType {
+@@ -87,6 +88,7 @@ pub struct InputManager {
+     last_key: KeyCode,
+     last_char: Option<char>,
+     last_click: Option<ClickEventData>,
++    wheel_remainder: Cell<f64>,
+ 
+     /// A map from gamepad buttons to key codes.
+     gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
+@@ -103,11 +105,31 @@ impl InputManager {
+             last_key: KeyCode::UNKNOWN,
+             last_char: None,
+             last_click: None,
++            wheel_remainder: Cell::new(0.0),
+             gamepad_button_mapping,
+             key_code_mapping_type: KeyCodeMappingType::Logical,
+         }
+     }
+ 
++    pub fn reset_wheel(&self) {
++        self.wheel_remainder.set(0.0);
++    }
++
++    pub fn mouse_wheel_delta(&self, delta: MouseWheelDelta) -> i32 {
++        let pixels = delta.pixels();
++        assert!(pixels.is_finite(), "non-finite mouse wheel delta");
++        let remainder = self.wheel_remainder.get();
++        let pixels = if pixels * remainder < 0.0 {
++            pixels
++        } else {
++            pixels + remainder
++        };
++        let lines = MouseWheelDelta::Pixels(pixels).lines().trunc();
++        self.wheel_remainder
++            .set(pixels - MouseWheelDelta::Lines(lines).pixels());
++        lines as i32
++    }
++
+     fn add_key(&mut self, key_code: KeyCode) {
+         self.last_key = key_code;
+         if key_code != KeyCode::UNKNOWN {
+@@ -581,6 +603,42 @@ fn map_character_to_key_code(char: char) -> Option<KeyCode> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn wheel_accumulates_without_amplifying_small_movements() {
++        for (pixels, count) in [(1.0, 100), (10.0, 10), (25.0, 4), (50.0, 2)] {
++            for sign in [-1.0, 1.0] {
++                let input = InputManager::new(HashMap::new());
++                for _ in 1..count {
++                    assert_eq!(
++                        input.mouse_wheel_delta(MouseWheelDelta::Pixels(sign * pixels)),
++                        0
++                    );
++                }
++                assert_eq!(
++                    input.mouse_wheel_delta(MouseWheelDelta::Pixels(sign * pixels)),
++                    sign as i32
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn wheel_preserves_remainders_and_resets_on_reversal_and_focus_loss() {
++        let input = InputManager::new(HashMap::new());
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(150.0)), 1);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(50.0)), 1);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(75.0)), 0);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(-25.0)), 0);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(-75.0)), -1);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(-75.0)), 0);
++        input.reset_wheel();
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(-25.0)), 0);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Pixels(0.0)), 0);
++        input.reset_wheel();
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Lines(3.0)), 3);
++        assert_eq!(input.mouse_wheel_delta(MouseWheelDelta::Lines(-1.0)), -1);
++    }
++
+     fn key(char: char, physical: PhysicalKey) -> KeyDescriptor {
+         KeyDescriptor {
+             logical_key: LogicalKey::Character(char),
+diff --git a/core/src/player.rs b/core/src/player.rs
+index e34c7cf..c8fb1f2 100644
+--- a/core/src/player.rs
++++ b/core/src/player.rs
+@@ -1064,6 +1064,7 @@ impl Player {
+         let lost = matches!(event, PlayerEvent::FocusLost);
+         self.mutate_with_update_context(|context| {
+             if lost {
++                context.input.reset_wheel();
+                 let focus_tracker = context.focus_tracker;
+                 focus_tracker.reset_focus(context);
+             }
