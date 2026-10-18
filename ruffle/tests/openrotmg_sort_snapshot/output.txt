@@ -1,0 +1,7 @@
+numeric-slots 2749171692
+indexed 1,2,0 original 294114
+unique 0 original 294114
+getters 40811104 reads 1,2,0,2,3,2,3,2,3,1,3,0,
+coercions 45290254 calls 12
+bench-digest 879921152
+COMPLETE

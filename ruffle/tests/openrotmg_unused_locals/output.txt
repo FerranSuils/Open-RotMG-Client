@@ -1,0 +1,8 @@
+producer
+producer
+coercion
+conversion threw
+handler read 12
+keys alpha,beta
+assignment 9
+COMPLETE

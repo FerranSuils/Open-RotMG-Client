@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def build(work, output):
     lock = json.loads((ROOT / 'ruffle/lock.json').read_text())
     for command, expected in [([os.environ.get('RUSTC', 'rustc'), '--version'], 'rustc ' + lock['rustVersion'] + ' '),
-                              (['wasm-bindgen', '--version'], 'wasm-bindgen ' + lock['wasmBindgenVersion'])]:
+                              (['wasm-bindgen', '--version'], 'wasm-bindgen ' + lock['wasmBindgenVersion']),
+                              (['wasm-opt', '--version'], 'wasm-opt version ' + lock['wasmOptVersion'] + ' ')]:
         actual = subprocess.check_output(command, text=True).strip()
         if not actual.startswith(expected):
             raise RuntimeError(f'Build tool mismatch: expected {expected}, got {actual}')
@@ -49,9 +50,10 @@ def build(work, output):
         print('+ ' + ' '.join(command), flush=True)
         subprocess.run(command, cwd=cwd, env=env | (extra or {}), check=True)
     run(['npm', 'ci', '--no-audit', '--no-fund'], web)
-    for test in ['socket::tests', 'input::tests::wheel_']:
-        run(['cargo', 'test', '--locked', '-p', 'ruffle_core', test])
-    for test in ['textline_', 'bitmapdata_draw', 'bitmapdata_clone', 'openrotmg_bitmap_compat', 'openrotmg_focus_activation', 'mouse_wheel_events', 'openrotmg_wheel_accumulator']:
+    run(['cargo', 'test', '--locked', '-p', 'ruffle_core'])
+    run(['cargo', 'test', '--locked', '-p', 'ruffle_render_wgpu'])
+    for test in ['textline_', 'bitmapdata_draw', 'bitmapdata_clone', 'openrotmg_bitmap_compat', 'openrotmg_focus_activation', 'mouse_wheel_events', 'openrotmg_wheel_accumulator',
+                 'openrotmg_unused_locals', 'openrotmg_slot_read', 'openrotmg_sort_snapshot', 'openrotmg_bitmap_batch']:
         run(['cargo', 'test', '--locked', '-p', 'tests', '--features', 'imgtests', '--test', 'tests', test, '--', '--test-threads', '4'])
     dist = web / 'packages/core/dist'
     dist.mkdir(parents=True, exist_ok=True)
@@ -71,6 +73,11 @@ def build(work, output):
         if flavor == 'extensions':
             command.append('--reference-types')
         run(command)
+        command = ['wasm-opt', '-O', '-g', str(dist / (name + '_bg.wasm')),
+                   '-o', str(dist / (name + '_bg.wasm'))]
+        if flavor == 'extensions':
+            command.append('--enable-reference-types')
+        run(command)
     seal = {'version_number': lock['version'], 'version_name': lock['version'], 'version_channel': 'stable',
             'build_date': lock['buildDate'], 'commitHash': lock['sourceCommit'], 'version4': '', 'firefox_extension_id': 'ruffle@ruffle.rs'}
     (web / 'version_seal.json').write_text(json.dumps(seal))
@@ -82,7 +89,8 @@ def build(work, output):
     if len(files) != 7 or len([n for n in files if n.endswith('.wasm')]) != 2 or 'ruffle.js' not in files:
         raise RuntimeError(f'Unexpected dual-runtime output: {sorted(files)}')
     files['openrotmg.json'] = (json.dumps({'version': lock['version'], 'sourceCommit': lock['sourceCommit'],
-        'patches': patches, 'rustVersion': lock['rustVersion'], 'wasmBindgenVersion': lock['wasmBindgenVersion']}, indent=2) + '\n').encode()
+        'patches': patches, 'rustVersion': lock['rustVersion'], 'wasmBindgenVersion': lock['wasmBindgenVersion'],
+        'wasmOptVersion': lock['wasmOptVersion']}, indent=2) + '\n').encode()
     with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
         for name, data in sorted(files.items()):
             info = ZipInfo(name, (2026, 10, 14, 0, 0, 0))

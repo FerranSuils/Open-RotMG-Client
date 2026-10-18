@@ -21,10 +21,21 @@ class BuildPinTests(unittest.TestCase):
             fetch.assert_not_called()
             self.assertFalse(work.exists())
 
+    def test_wrong_optimizer_fails_before_download_or_build(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                subprocess, 'check_output', side_effect=[
+                    'rustc 1.99.0 (pinned)', 'wasm-bindgen 0.2.127', 'wasm-opt version 0 (wrong)']), patch.object(
+                build_ruffle, 'urlopen') as fetch:
+            work = Path(directory) / 'new'
+            with self.assertRaisesRegex(RuntimeError, 'Build tool mismatch'):
+                build_ruffle.build(work, Path(directory) / 'bundle.zip')
+            fetch.assert_not_called()
+            self.assertFalse(work.exists())
+
     def test_source_checksum_fails_before_extracting_or_patching(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
                 subprocess, 'check_output', side_effect=[
-                    'rustc 1.99.0 (pinned)', 'wasm-bindgen 0.2.127', 'v22.22.3']), patch.object(
+                    'rustc 1.99.0 (pinned)', 'wasm-bindgen 0.2.127', 'wasm-opt version 129 (version_129)', 'v22.22.3']), patch.object(
                 build_ruffle, 'urlopen', return_value=io.BytesIO(b'wrong source')), patch.object(
                 subprocess, 'run') as command:
             with self.assertRaisesRegex(RuntimeError, 'source archive checksum mismatch'):
