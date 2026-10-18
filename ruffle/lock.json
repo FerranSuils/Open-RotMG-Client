@@ -6,7 +6,7 @@
   "wasmBindgenVersion": "0.2.127",
   "wasmOptVersion": "129",
   "buildDate": "2026-10-18T00:00:00.000Z",
-  "bundleSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "bundleSha256": "e29038e036db3f29461381e7dabb8c18bf3aabbba7b067a545e0fb57bda2fa00",
   "patches": [
     "0001-alpha-mask.patch",
     "0002-disposed-bitmap-fill.patch",
