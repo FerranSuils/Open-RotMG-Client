@@ -1,0 +1,5 @@
+same-texture exact
+interleaved exact
+samplers exact
+fill-stroke-mask exact
+COMPLETE

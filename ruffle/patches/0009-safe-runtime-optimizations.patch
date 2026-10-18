@@ -1,0 +1,689 @@
+--- a/core/src/avm2/function.rs
++++ b/core/src/avm2/function.rs
+@@ -8,6 +8,7 @@
+ use crate::avm2::value::Value;
+ use crate::string::WString;
+ use gc_arena::{Collect, Gc};
++use smallvec::SmallVec;
+ use std::borrow::Cow;
+ use std::cell::Cell;
+ use std::fmt;
+@@ -272,7 +273,7 @@
+             }
+ 
+             // Retrieve the arguments from the Activation's stack frame.
+-            let args_vec: Vec<_>;
++            let args_vec: SmallVec<[Value<'gc>; 8]>;
+             let args = if method.is_variadic() {
+                 let signature = method.resolved_param_config();
+ 
+--- a/core/src/avm2/optimizer.rs
++++ b/core/src/avm2/optimizer.rs
+@@ -1,5 +1,6 @@
+ mod blocks;
+ mod dce;
++mod dead_locals;
+ mod nop_remover;
+ mod peephole;
+ mod type_aware;
+@@ -44,10 +45,15 @@
+         sets_local_0,
+     )?;
+ 
+-    peephole::postprocess_peephole(code_slice, &jump_targets);
++    peephole::postprocess_peephole(code_slice, &jump_targets, false);
+ 
+     dce::eliminate_dead_code(code_slice, &jump_targets);
+ 
++    if activation.avm2().optimizer_enabled() {
++        dead_locals::eliminate_unused_locals(code_slice);
++        peephole::postprocess_peephole(code_slice, &jump_targets, true);
++    }
++
+     nop_remover::remove_nops(code, method_exceptions);
+ 
+     Ok(())
+--- a/core/src/avm2/op.rs
++++ b/core/src/avm2/op.rs
+@@ -180,6 +180,11 @@
+         // note: 0-indexed, as opposed to FP.
+         index: usize,
+     },
++    GetLocalSlot {
++        // Both operands fit without growing the 16-byte instruction.
++        local: u32,
++        index: u32,
++    },
+     GetSuper {
+         multiname: Gc<'gc, Multiname<'gc>>,
+     },
+--- a/core/src/avm2/activation.rs
++++ b/core/src/avm2/activation.rs
+@@ -29,6 +29,7 @@
+ use crate::tag_utils::SwfMovie;
+ use gc_arena::Gc;
+ use ruffle_macros::istr;
++use smallvec::SmallVec;
+ use std::cell::Cell;
+ use std::sync::Arc;
+ use swf::avm2::types::MethodFlags as AbcMethodFlags;
+@@ -259,19 +260,18 @@
+         Ok(())
+     }
+ 
+-    /// Collects all arguments passed to this `Activation` into a `Vec`. This
++    /// Collects all arguments passed to this `Activation` into a buffer. This
+     /// function expects the rest of the arguments to already be on the AVM
+     /// stack.
+     pub fn collect_all_arguments(
+         &mut self,
+         signature: &[ResolvedParamConfig<'gc>],
+         user_arguments: FunctionArgs<'_, 'gc>,
+-    ) -> Vec<Value<'gc>> {
+-        let mut all_arguments = Vec::with_capacity(user_arguments.len());
++    ) -> SmallVec<[Value<'gc>; 8]> {
++        let mut all_arguments = SmallVec::with_capacity(user_arguments.len());
+ 
+-        // Unfortunately we need to allocate now: we need to put all the
+-        // arguments we just processed into a Vec, so `arguments` or `rest`
+-        // can put them into an ArrayObject. The missing argument check
++        // `arguments` and `rest` need the coerced declared arguments before
++        // the untouched extra values. The missing argument check
+         // in `init_from_method` ensures that we have at least `signature.len()`
+         // arguments on the stack right now.
+         for i in 0..signature.len() {
+@@ -279,7 +279,7 @@
+             all_arguments.push(arg);
+         }
+ 
+-        // We put all the non-variadic arguments into the Vec, but there
++        // We put all the non-variadic arguments into the buffer, but there
+         // could have been more passed to the function. Add them now.
+         for i in signature.len()..user_arguments.len() {
+             let arg = user_arguments.get_at(i);
+@@ -707,6 +707,15 @@
+                 Op::GetScriptGlobals { script } => self.op_get_script_globals(*script),
+                 Op::GetDescendants { multiname } => self.op_get_descendants(*multiname),
+                 Op::GetSlot { index } => self.op_get_slot(*index),
++                Op::GetLocalSlot { local, index } => {
++                    let object = self
++                        .local_register(*local)
++                        .null_check(self, None)?
++                        .as_object()
++                        .expect("Cannot get_slot on primitive");
++                    self.push_stack(object.get_slot(*index as usize));
++                    Ok(())
++                }
+                 Op::SetSlot { index } => self.op_set_slot(*index),
+                 Op::SetSlotCoerceI { index } => self.op_set_slot_coerce_i(*index),
+                 Op::SetSlotNoCoerce { index } => self.op_set_slot_no_coerce(*index),
+--- a/core/src/avm2/globals/array.rs
++++ b/core/src/avm2/globals/array.rs
+@@ -5,8 +5,10 @@
+ use crate::avm2::array::ArrayStorage;
+ use crate::avm2::error::{make_error_1005, make_error_1125};
+ use crate::avm2::function::FunctionArgs;
++use crate::avm2::multiname::Multiname;
+ use crate::avm2::object::{ArrayObject, Object, TObject};
+ use crate::avm2::parameters::ParametersExt;
++use crate::avm2::property::Property;
+ use crate::avm2::value::Value;
+ use crate::string::AvmString;
+ use bitflags::bitflags;
+@@ -740,9 +742,9 @@
+ 
+ /// Identity closure shim which exists purely to decorate closure types with
+ /// the HRTB necessary to accept an activation.
+-fn constrain<'a, 'gc, 'ctxt, F>(f: F) -> F
++fn constrain<'a, 'gc, 'ctxt, T, F>(f: F) -> F
+ where
+-    F: FnMut(&mut Activation<'a, 'gc>, Value<'gc>, Value<'gc>) -> Result<Ordering, Error<'gc>>,
++    F: FnMut(&mut Activation<'a, 'gc>, T, T) -> Result<Ordering, Error<'gc>>,
+ {
+     f
+ }
+@@ -769,11 +771,29 @@
+ where
+     C: FnMut(&mut Activation<'a, 'gc>, Value<'gc>, Value<'gc>) -> Result<Ordering, Error<'gc>>,
+ {
++    sort_inner_indexed(activation, values, options, |activation, a, b| {
++        sort_func(activation, a.1, b.1)
++    })
++}
++
++fn sort_inner_indexed<'a, 'gc, C>(
++    activation: &mut Activation<'a, 'gc>,
++    values: &mut [(usize, Value<'gc>)],
++    options: SortOptions,
++    mut sort_func: C,
++) -> Result<bool, Error<'gc>>
++where
++    C: FnMut(
++        &mut Activation<'a, 'gc>,
++        (usize, Value<'gc>),
++        (usize, Value<'gc>),
++    ) -> Result<Ordering, Error<'gc>>,
++{
+     let mut unique_sort_satisfied = true;
+ 
+-    qsort(values, &mut |(_, a), (_, b)| {
+-        let unresolved_a = *a;
+-        let unresolved_b = *b;
++    qsort(values, &mut |a, b| {
++        let unresolved_a = a.1;
++        let unresolved_b = b.1;
+ 
+         if matches!(unresolved_a, Value::Undefined) && matches!(unresolved_b, Value::Undefined) {
+             unique_sort_satisfied = false;
+@@ -1201,6 +1221,47 @@
+     Ok(out)
+ }
+ 
++fn numeric_slot_keys<'gc>(
++    activation: &mut Activation<'_, 'gc>,
++    values: &[(usize, Value<'gc>)],
++    names: &[AvmString<'gc>],
++    options: &[SortOptions],
++) -> Option<Vec<[Value<'gc>; 2]>> {
++    if names.is_empty()
++        || names.len() > 2
++        || options
++            .iter()
++            .take(names.len())
++            .any(|o| !o.contains(SortOptions::NUMERIC))
++    {
++        return None;
++    }
++    let names: Vec<_> = names
++        .iter()
++        .map(|name| Multiname::new(activation.avm2().find_public_namespace(), *name))
++        .collect();
++    let mut keys = Vec::with_capacity(values.len());
++    for (_, value) in values {
++        let Value::Object(Object::ScriptObject(object)) = value else {
++            return None;
++        };
++        let mut row = [Value::Undefined; 2];
++        for (i, name) in names.iter().enumerate() {
++            let slot_id = match object.vtable().get_trait(name)? {
++                Property::Slot { slot_id } | Property::ConstSlot { slot_id } => slot_id,
++                _ => return None,
++            };
++            let value = object.get_slot(slot_id);
++            if !matches!(value, Value::Integer(_) | Value::Number(_)) {
++                return None;
++            }
++            row[i] = value;
++        }
++        keys.push(row);
++    }
++    Some(keys)
++}
++
+ /// Impl `Array.sortOn`
+ pub fn sort_on<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+@@ -1232,43 +1293,53 @@
+         );
+     }
+ 
+-    let unique_satisfied = sort_inner(
++    // Only numeric data slots can be snapshotted without changing getter/coercion callbacks.
++    let keys = numeric_slot_keys(activation, &values, &field_names, &options);
++    let unique_satisfied = sort_inner_indexed(
+         activation,
+         &mut values,
+         first_option,
+-        constrain(|activation, a, b| {
+-            for (field_name, options) in field_names.iter().zip(options.iter()) {
+-                // note: these are incorrect: pretty sure
+-                // if the object is null/undefined or does not have the field,
+-                // it's treated as if the field's value was undefined.
+-                // TODO: verify this and fix it
+-                let a_object = a.null_check(activation, None)?;
+-                let a_field = a_object.get_public_property(*field_name, activation)?;
+-
+-                let b_object = b.null_check(activation, None)?;
+-                let b_field = b_object.get_public_property(*field_name, activation)?;
+-
+-                let ord = if options.contains(SortOptions::NUMERIC) {
+-                    compare_numeric_slow(activation, a_field, b_field)?
+-                } else if options.contains(SortOptions::CASE_INSENSITIVE) {
+-                    compare_string_case_insensitive(activation, a_field, b_field)?
+-                } else {
+-                    compare_string_case_sensitive(activation, a_field, b_field)?
+-                };
++        constrain(
++            |activation, a: (usize, Value<'gc>), b: (usize, Value<'gc>)| {
++                for (field_index, (field_name, options)) in
++                    field_names.iter().zip(options.iter()).enumerate()
++                {
++                    // note: these are incorrect: pretty sure
++                    // if the object is null/undefined or does not have the field,
++                    // it's treated as if the field's value was undefined.
++                    // TODO: verify this and fix it
++                    let (a_field, b_field) = if let Some(keys) = &keys {
++                        (keys[a.0][field_index], keys[b.0][field_index])
++                    } else {
++                        let a_object = a.1.null_check(activation, None)?;
++                        let a_field = a_object.get_public_property(*field_name, activation)?;
++                        let b_object = b.1.null_check(activation, None)?;
++                        let b_field = b_object.get_public_property(*field_name, activation)?;
++                        (a_field, b_field)
++                    };
++
++                    let ord = if options.contains(SortOptions::NUMERIC) {
++                        compare_numeric_slow(activation, a_field, b_field)?
++                    } else if options.contains(SortOptions::CASE_INSENSITIVE) {
++                        compare_string_case_insensitive(activation, a_field, b_field)?
++                    } else {
++                        compare_string_case_sensitive(activation, a_field, b_field)?
++                    };
+ 
+-                if matches!(ord, Ordering::Equal) {
+-                    continue;
+-                }
++                    if matches!(ord, Ordering::Equal) {
++                        continue;
++                    }
+ 
+-                if options.contains(SortOptions::DESCENDING) {
+-                    return Ok(ord.reverse());
+-                } else {
+-                    return Ok(ord);
++                    if options.contains(SortOptions::DESCENDING) {
++                        return Ok(ord.reverse());
++                    } else {
++                        return Ok(ord);
++                    }
+                 }
+-            }
+ 
+-            Ok(Ordering::Equal)
+-        }),
++                Ok(Ordering::Equal)
++            },
++        ),
+     )?;
+ 
+     sort_postprocess(activation, this, first_option, unique_satisfied, values)
+--- a/core/src/avm2/globals/vector.rs
++++ b/core/src/avm2/globals/vector.rs
+@@ -15,6 +15,7 @@
+ use crate::avm2::{Error, Multiname, QName};
+ use crate::string::{AvmString, WStr};
+ use ruffle_macros::istr;
++use smallvec::SmallVec;
+ use std::cmp::{Ordering, max, min};
+ 
+ // Allocator for generic Vector, not specialized Vector
+@@ -432,7 +433,7 @@
+     };
+     // Make sure vector is not borrowed while coercing which can have side-effects.
+ 
+-    let mut coerced_args = Vec::new();
++    let mut coerced_args = SmallVec::<[Value<'gc>; 8]>::new();
+     for arg in args {
+         let coerced_arg = arg.coerce_to_type(activation, value_type)?;
+         coerced_args.push(coerced_arg);
+--- /dev/null
++++ b/core/src/avm2/optimizer/dead_locals.rs
+@@ -0,0 +1,118 @@
++use crate::avm2::op::Op;
++use std::cell::Cell;
++use std::collections::HashSet;
++
++pub fn eliminate_unused_locals(ops: &[Cell<Op<'_>>]) {
++    let mut read = HashSet::from([0]);
++    for op in ops {
++        match op.get() {
++            Op::GetLocal { index }
++            | Op::GetLocalSlot { local: index, .. }
++            | Op::IncLocal { index }
++            | Op::IncLocalI { index }
++            | Op::DecLocal { index }
++            | Op::DecLocalI { index } => {
++                read.insert(index);
++            }
++            Op::HasNext2 {
++                object_register,
++                index_register,
++            } => {
++                read.insert(object_register);
++                read.insert(index_register);
++            }
++            Op::Debug {
++                is_local_register: true,
++                register,
++                ..
++            } => {
++                read.insert(u32::from(register));
++            }
++            _ => {}
++        }
++    }
++    for op in ops {
++        match op.get() {
++            Op::SetLocal { index } if !read.contains(&index) => op.set(Op::Pop),
++            Op::StoreLocal { index } if !read.contains(&index) => op.set(Op::Nop),
++            _ => {}
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn optimize(ops: &[Op<'static>]) -> Vec<Op<'static>> {
++        let code: Vec<_> = ops.iter().copied().map(Cell::new).collect();
++        eliminate_unused_locals(&code);
++        code.iter().map(Cell::get).collect()
++    }
++    #[test]
++    fn fused_slot_reads_preserve_nonreceiver_local_stores() {
++        let code = optimize(&[
++            Op::SetLocal { index: 3 },
++            Op::GetLocalSlot { local: 3, index: 7 },
++        ]);
++        assert!(matches!(code[0], Op::SetLocal { index: 3 }));
++    }
++
++    #[test]
++    fn unused_store_preserves_producer_and_pop() {
++        let code = optimize(&[Op::Call { num_args: 0 }, Op::SetLocal { index: 2 }]);
++        assert!(matches!(code[0], Op::Call { .. }));
++        assert!(matches!(code[1], Op::Pop));
++    }
++    #[test]
++    fn retained_stack_value_and_register_cleanup() {
++        let code = optimize(&[Op::StoreLocal { index: 2 }, Op::Kill { index: 2 }]);
++        assert!(matches!(code[0], Op::Nop));
++        assert!(matches!(code[1], Op::Kill { index: 2 }));
++    }
++    #[test]
++    fn reads_anywhere_protect_all_writes_including_handlers() {
++        let code = optimize(&[
++            Op::SetLocal { index: 2 },
++            Op::Kill { index: 2 },
++            Op::GetLocal { index: 2 },
++        ]);
++        assert!(matches!(code[0], Op::SetLocal { .. }));
++        assert!(matches!(code[1], Op::Kill { .. }));
++    }
++    #[test]
++    fn receiver_and_coercing_updates_remain_observable() {
++        let code = optimize(&[
++            Op::SetLocal { index: 0 },
++            Op::SetLocal { index: 2 },
++            Op::IncLocal { index: 2 },
++            Op::SetLocal { index: 3 },
++            Op::DecLocalI { index: 3 },
++        ]);
++        assert!(matches!(code[0], Op::SetLocal { index: 0 }));
++        assert!(matches!(code[1], Op::SetLocal { index: 2 }));
++        assert!(matches!(code[3], Op::SetLocal { index: 3 }));
++    }
++    #[test]
++    fn enumeration_registers_are_read_write_not_dead() {
++        let code = optimize(&[
++            Op::SetLocal { index: 2 },
++            Op::SetLocal { index: 3 },
++            Op::HasNext2 {
++                object_register: 2,
++                index_register: 3,
++            },
++        ]);
++        assert!(matches!(code[0], Op::SetLocal { index: 2 }));
++        assert!(matches!(code[1], Op::SetLocal { index: 3 }));
++    }
++    #[test]
++    fn discarded_boolean_store_is_removed_by_existing_peephole() {
++        let code = [
++            Cell::new(Op::PushTrue),
++            Cell::new(Op::SetLocal { index: 2 }),
++        ];
++        eliminate_unused_locals(&code);
++        super::super::peephole::postprocess_peephole(&code, &HashSet::new(), false);
++        assert!(code.iter().all(|op| matches!(op.get(), Op::Nop)));
++    }
++}
+--- a/core/src/avm2/optimizer/type_aware.rs
++++ b/core/src/avm2/optimizer/type_aware.rs
+@@ -1301,7 +1301,7 @@
+                 let local_type = locals.at(index as usize);
+                 stack.push(activation, local_type)?;
+             }
+-            Op::StoreLocal { .. } => {
++            Op::StoreLocal { .. } | Op::GetLocalSlot { .. } => {
+                 unreachable!("Only the peephole optimizer emits StoreLocal")
+             }
+             Op::FindPropStrict { multiname } | Op::FindProperty { multiname } => {
+--- a/core/src/avm2/optimizer/peephole.rs
++++ b/core/src/avm2/optimizer/peephole.rs
+@@ -21,7 +21,11 @@
+ 
+ /// A peephole optimizer to run after type-aware optimizations. This should be
+ /// called once on the entire code slice.
+-pub fn postprocess_peephole<'a>(ops: &'a [Cell<Op<'_>>], jump_targets: &HashSet<usize>) {
++pub fn postprocess_peephole<'a>(
++    ops: &'a [Cell<Op<'_>>],
++    jump_targets: &HashSet<usize>,
++    fuse_local_slots: bool,
++) {
+     // Determine if this method ever depends on the state of the scope stack.
+     let mut uses_scope_ops = false;
+ 
+@@ -68,6 +72,15 @@
+         if let Some(last_op) = last_op {
+             // Optimizations on both the current and the last op
+             match (last_op.get(), current_op.get()) {
++                (Op::GetLocal { index: local }, Op::GetSlot { index })
++                    if fuse_local_slots && index <= u32::MAX as usize =>
++                {
++                    last_op.set(Op::Nop);
++                    current_op.set(Op::GetLocalSlot {
++                        local,
++                        index: index as u32,
++                    });
++                }
+                 (push_op, Op::Pop) if push_op.is_pure_push() => {
+                     // Eliminate PushXXX+Pop and GetLocal+Pop
+                     last_op.set(Op::Nop);
+@@ -167,3 +180,62 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn receiver_read() -> [Cell<Op<'static>>; 2] {
++        [
++            Cell::new(Op::GetLocal { index: 0 }),
++            Cell::new(Op::GetSlot { index: 7 }),
++        ]
++    }
++
++    #[test]
++    fn fuses_receiver_slot_when_enabled() {
++        let code = receiver_read();
++        postprocess_peephole(&code, &HashSet::new(), true);
++        assert!(matches!(code[0].get(), Op::Nop));
++        assert!(matches!(
++            code[1].get(),
++            Op::GetLocalSlot { local: 0, index: 7 }
++        ));
++    }
++
++    #[test]
++    fn preserves_nonreceiver_slot_at_branch_entry() {
++        let code = [
++            Cell::new(Op::GetLocal { index: 4 }),
++            Cell::new(Op::GetSlot { index: 7 }),
++        ];
++        postprocess_peephole(&code, &HashSet::from([1]), true);
++        assert!(matches!(code[0].get(), Op::GetLocal { index: 4 }));
++        assert!(matches!(code[1].get(), Op::GetSlot { index: 7 }));
++    }
++
++    #[test]
++    fn preserves_receiver_slot_at_branch_entry() {
++        let code = receiver_read();
++        postprocess_peephole(&code, &HashSet::from([1]), true);
++        assert!(matches!(code[0].get(), Op::GetLocal { index: 0 }));
++        assert!(matches!(code[1].get(), Op::GetSlot { index: 7 }));
++    }
++
++    #[test]
++    fn preserves_disabled_and_fuses_other_register_reads() {
++        let code = receiver_read();
++        postprocess_peephole(&code, &HashSet::new(), false);
++        assert!(matches!(code[0].get(), Op::GetLocal { index: 0 }));
++        let code = [
++            Cell::new(Op::GetLocal { index: 1 }),
++            Cell::new(Op::GetSlot { index: 7 }),
++        ];
++        postprocess_peephole(&code, &HashSet::new(), true);
++        assert!(matches!(code[0].get(), Op::Nop));
++        assert!(matches!(
++            code[1].get(),
++            Op::GetLocalSlot { local: 1, index: 7 }
++        ));
++    }
++}
+--- a/render/wgpu/src/buffer_builder.rs
++++ b/render/wgpu/src/buffer_builder.rs
+@@ -59,6 +59,22 @@
+         Ok((start_pos as wgpu::BufferAddress)..(self.inner.len() as wgpu::BufferAddress))
+     }
+ 
++    pub fn offset_indices(&mut self, range: Range<wgpu::BufferAddress>, offset: u32) {
++        assert_eq!(range.start % 4, 0);
++        assert_eq!((range.end - range.start) % 4, 0);
++        let start = usize::try_from(range.start).expect("Bitmap batch range exceeds address space");
++        let end = usize::try_from(range.end).expect("Bitmap batch range exceeds address space");
++        for bytes in self.inner[start..end].chunks_exact_mut(4) {
++            let index = u32::from_ne_bytes(bytes.try_into().unwrap());
++            bytes.copy_from_slice(
++                &index
++                    .checked_add(offset)
++                    .expect("Bitmap batch index overflow")
++                    .to_ne_bytes(),
++            );
++        }
++    }
++
+     pub fn finish(
+         self,
+         device: &wgpu::Device,
+@@ -85,3 +101,31 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn rebases_only_the_appended_index_range() {
++        let mut buffer = BufferBuilder::new(&wgpu::Limits::default(), 0);
++        buffer.add(&[2u32, 0, 1]).unwrap();
++        let range = buffer.add(&[0u32, 1, 2]).unwrap();
++        buffer.add(&[0u32, 2]).unwrap();
++        buffer.offset_indices(range, 3);
++        let values: Vec<_> = buffer
++            .inner
++            .chunks_exact(4)
++            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
++            .collect();
++        assert_eq!(values, [2, 0, 1, 3, 4, 5, 0, 2]);
++    }
++
++    #[test]
++    #[should_panic(expected = "Bitmap batch index overflow")]
++    fn overflowing_batch_indices_are_not_wrapped() {
++        let mut buffer = BufferBuilder::new(&wgpu::Limits::default(), 0);
++        let range = buffer.add(&[u32::MAX]).unwrap();
++        buffer.offset_indices(range, 1);
++    }
++}
+--- a/render/wgpu/src/backend.rs
++++ b/render/wgpu/src/backend.rs
+@@ -294,7 +294,9 @@
+             self.shape_tessellator
+                 .tessellate_shape_with_scale(shape, bitmap_source, scale);
+ 
+-        let mut draws = Vec::with_capacity(lyon_mesh.draws.len());
++        let input_draws = lyon_mesh.draws.len();
++        let mut draws: Vec<PendingDraw> = Vec::with_capacity(input_draws);
++        let mut merged_draws = 0;
+         let mut uniform_buffer = BufferBuilder::new(
+             &self.descriptors.limits,
+             self.descriptors.limits.min_uniform_buffer_offset_alignment,
+@@ -322,9 +324,24 @@
+                 &mut vertex_buffer,
+                 &mut index_buffer,
+             ) {
++                if let Some(previous) = draws.last_mut()
++                    && previous.merge_bitmap(&draw, &mut index_buffer)
++                {
++                    merged_draws += 1;
++                    continue;
++                }
+                 draws.push(draw);
+             }
+         }
++        if merged_draws > 0 {
++            tracing::debug!(
++                shape_id,
++                input_draws,
++                merged_draws,
++                output_draws = draws.len(),
++                "bitmap draw batching"
++            );
++        }
+ 
+         let uniform_buffer = uniform_buffer.finish(
+             &self.descriptors.device,
+--- a/render/wgpu/src/mesh.rs
++++ b/render/wgpu/src/mesh.rs
+@@ -37,6 +37,37 @@
+ }
+ 
+ impl PendingDraw {
++    pub fn merge_bitmap(&mut self, next: &Self, indices: &mut BufferBuilder) -> bool {
++        let same_binding = matches!((&self.draw_type, &next.draw_type),
++            (PendingDrawType::Bitmap { binds: a }, PendingDrawType::Bitmap { binds: b })
++                if a.bind_group == b.bind_group);
++        // Mask prefixes cannot be concatenated unless both draws contain only fills.
++        if !same_binding
++            || self.vertices.end != next.vertices.start
++            || self.indices.end != next.indices.start
++            || self.num_mask_indices != self.num_indices
++            || next.num_mask_indices != next.num_indices
++        {
++            return false;
++        }
++        let vertex_count =
++            (self.vertices.end - self.vertices.start) / std::mem::size_of::<PosUvVertex>() as u64;
++        indices.offset_indices(
++            next.indices.clone(),
++            vertex_count
++                .try_into()
++                .expect("Bitmap batch vertex count overflow"),
++        );
++        self.vertices.end = next.vertices.end;
++        self.indices.end = next.indices.end;
++        self.num_indices = self
++            .num_indices
++            .checked_add(next.num_indices)
++            .expect("Bitmap batch index count overflow");
++        self.num_mask_indices = self.num_indices;
++        true
++    }
++
+     pub fn finish(
+         self,
+         descriptors: &Descriptors,

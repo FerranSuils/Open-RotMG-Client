@@ -1,0 +1,10 @@
+slots 125
+alias 400
+replacement 42
+null 1009
+null 1009
+catch 1007.75
+getter 12.5 reads 2
+mutated 315
+checksum 3150000
+COMPLETE
