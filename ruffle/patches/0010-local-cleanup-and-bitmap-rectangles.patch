@@ -1,0 +1,243 @@
+--- a/core/src/avm2/optimizer.rs
++++ b/core/src/avm2/optimizer.rs
+@@ -1,4 +1,6 @@
+ mod blocks;
++#[cfg(test)]
++mod cleanup_tests;
+ mod dce;
+ mod dead_locals;
+ mod nop_remover;
+@@ -50,13 +52,28 @@
+     dce::eliminate_dead_code(code_slice, &jump_targets);
+ 
+     if activation.avm2().optimizer_enabled() {
+-        dead_locals::eliminate_unused_locals(code_slice);
+-        peephole::postprocess_peephole(code_slice, &jump_targets, true);
++        cleanup_unused_locals(code_slice, &jump_targets);
+     }
+ 
+     nop_remover::remove_nops(code, method_exceptions);
+ 
+     Ok(())
++}
++
++fn cleanup_unused_locals(ops: &[Cell<Op<'_>>], jump_targets: &HashSet<usize>) {
++    // Removing a dead read can make an earlier local store dead only on the next pass.
++    let measure = || ops.iter().fold((0usize, 0usize), |(live, stores), op| {
++        let op = op.get();
++        (live + usize::from(!op.is_nop()), stores + usize::from(matches!(op, Op::SetLocal { .. } | Op::StoreLocal { .. })))
++    });
++    loop {
++        let before = measure();
++        dead_locals::eliminate_unused_locals(ops);
++        peephole::postprocess_peephole(ops, jump_targets, true);
++        let after = measure();
++        if after == before { break; }
++        assert!(after < before, "Dead-local cleanup must monotonically remove instructions or stores");
++    }
+ }
+ 
+ fn determine_sets_local_0<'gc>(ops: &[Cell<Op<'gc>>]) -> bool {
+--- /dev/null
++++ b/core/src/avm2/optimizer/cleanup_tests.rs
+@@ -0,0 +1,80 @@
++use super::*;
++
++const RETURN: Op<'static> = Op::ReturnVoid { return_type: None };
++fn cleanup(ops: &[Op<'static>], targets: &[usize]) -> Vec<Op<'static>> {
++    let ops: Vec<_> = ops.iter().copied().map(Cell::new).collect();
++    cleanup_unused_locals(&ops, &targets.iter().copied().collect());
++    ops.iter()
++        .map(Cell::get)
++        .filter(|op| !op.is_nop())
++        .collect()
++}
++
++#[test]
++fn dead_local_chains_reach_fixed_point() {
++    let mut ops = vec![Op::PushTrue, Op::SetLocal { index: 1 }];
++    for index in 1..80 {
++        ops.extend([Op::GetLocal { index }, Op::SetLocal { index: index + 1 }]);
++    }
++    ops.extend([Op::GetLocal { index: 80 }, Op::Pop, RETURN]);
++    assert!(matches!(
++        cleanup(&ops, &[]).as_slice(),
++        [Op::ReturnVoid { .. }]
++    ));
++}
++
++#[test]
++fn nested_pure_pushes_and_pops_reach_fixed_point() {
++    let mut ops = vec![Op::PushTrue; 80];
++    ops.extend([Op::Pop; 80]);
++    ops.push(RETURN);
++    assert!(matches!(
++        cleanup(&ops, &[]).as_slice(),
++        [Op::ReturnVoid { .. }]
++    ));
++}
++
++#[test]
++fn preserves_coercion_producers_receiver_and_branch_entries() {
++    let ops = [
++        Op::GetLocal { index: 1 },
++        Op::CoerceI,
++        Op::SetLocal { index: 2 },
++        Op::GetLocal { index: 2 },
++        Op::Pop,
++        RETURN,
++    ];
++    assert!(matches!(
++        cleanup(&ops, &[]).as_slice(),
++        [
++            Op::GetLocal { index: 1 },
++            Op::CoerceI,
++            Op::Pop,
++            Op::ReturnVoid { .. }
++        ]
++    ));
++    assert!(matches!(
++        cleanup(&[Op::PushNull, Op::SetLocal { index: 0 }, RETURN], &[]).as_slice(),
++        [
++            Op::PushNull,
++            Op::SetLocal { index: 0 },
++            Op::ReturnVoid { .. }
++        ]
++    ));
++    assert!(matches!(
++        cleanup(
++            &[
++                Op::GetLocal { index: 1 },
++                Op::GetSlot { index: 5 },
++                Op::ReturnValue { return_type: None }
++            ],
++            &[1]
++        )
++        .as_slice(),
++        [
++            Op::GetLocal { index: 1 },
++            Op::GetSlot { index: 5 },
++            Op::ReturnValue { .. }
++        ]
++    ));
++}
+--- a/render/src/tessellator.rs
++++ b/render/src/tessellator.rs
+@@ -21,6 +21,30 @@
+ }
+ 
+ const TESSELLATION_EPSILON: f32 = 0.0000001;
++#[cfg(test)]
++#[path = "tessellator_rectangle_tests.rs"]
++mod rectangle_tests;
++
++#[cfg(test)]
++thread_local! { static RECTANGLE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
++#[cfg(test)]
++fn rectangle_hits() -> u64 { RECTANGLE_HITS.with(std::cell::Cell::get) }
++
++fn bitmap_rectangle(commands: &[DrawCommand]) -> Option<[[f32; 2]; 4]> {
++    use DrawCommand::{LineTo, MoveTo};
++    // Drawing prepends its previous cursor; Lyon keeps only the last leading MoveTo.
++    let first_edge = commands.iter().position(|c| !matches!(c, MoveTo(_)))?;
++    let commands = &commands[first_edge.checked_sub(1)?..];
++    let corners = match commands {
++        [MoveTo(a), LineTo(b), LineTo(c), LineTo(d)] => [*a, *b, *c, *d],
++        [MoveTo(a), LineTo(b), LineTo(c), LineTo(d), LineTo(e)] if a == e => [*a, *b, *c, *d],
++        _ => return None,
++    };
++    let p = corners.map(|v| [v.x.to_pixels() as f32, v.y.to_pixels() as f32]);
++    (p[0][0] == p[3][0] && p[1][0] == p[2][0] && p[0][1] == p[1][1] && p[2][1] == p[3][1]
++        && p[1][0] - p[0][0] >= 0.5 && p[3][1] - p[0][1] >= 0.5
++        && p.iter().flatten().all(|v| v.is_finite() && v.abs() <= 32768.0)).then_some(p)
++}
+ 
+ impl ShapeTessellator {
+     pub fn new() -> Self {
+@@ -56,19 +80,23 @@
+         self.lyon_mesh = VertexBuffers::new();
+ 
+         for path in shape.paths {
++            let rectangle = match &path {
++                DrawPath::Fill { style, commands, .. } if matches!(style, swf::FillStyle::Bitmap { .. }) => bitmap_rectangle(commands),
++                _ => None,
++            };
+             let (fill_style, lyon_path, next_is_stroke) = match &path {
+                 DrawPath::Fill {
+                     style,
+                     commands,
+                     winding_rule: _,
+-                } => (*style, ruffle_path_to_lyon_path(commands, true), false),
++                } => (*style, rectangle.is_none().then(|| ruffle_path_to_lyon_path(commands, true)), false),
+                 DrawPath::Stroke {
+                     style,
+                     commands,
+                     is_closed,
+                 } => (
+                     style.fill_style(),
+-                    ruffle_path_to_lyon_path(commands, *is_closed),
++                    Some(ruffle_path_to_lyon_path(commands, *is_closed)),
+                     true,
+                 ),
+             };
+@@ -160,6 +188,17 @@
+             }
+             self.is_stroke = next_is_stroke;
+ 
++            if let Some(points) = rectangle {
++                #[cfg(test)]
++                RECTANGLE_HITS.with(|hits| hits.set(hits.get() + 1));
++                assert!(needs_flush && !next_is_stroke && self.lyon_mesh.vertices.is_empty() && self.lyon_mesh.indices.is_empty());
++                self.lyon_mesh.vertices.extend(points.map(|[x, y]| Vertex { x, y, color }));
++                // Matching Lyon's triangle order preserves rounded bitmap UV interpolation.
++                self.lyon_mesh.indices.extend([1, 0, 3, 1, 3, 2]);
++                self.flush_draw(draw);
++                continue;
++            }
++            let lyon_path = lyon_path.expect("Non-rectangle geometry requires its original Lyon path");
+             let mut buffers_builder =
+                 BuffersBuilder::new(&mut self.lyon_mesh, RuffleVertexCtor { color });
+             let result = match path {
+--- /dev/null
++++ b/render/src/tessellator_rectangle_tests.rs
+@@ -0,0 +1,40 @@
++use super::*;
++fn commands(x:i32,y:i32,w:i32,h:i32,closed:bool)->Vec<DrawCommand>{
++    let p=|x,y|swf::Point{x:swf::Twips::new(x),y:swf::Twips::new(y)};
++    let mut c=vec![DrawCommand::MoveTo(p(x,y)),DrawCommand::LineTo(p(x+w,y)),DrawCommand::LineTo(p(x+w,y+h)),DrawCommand::LineTo(p(x,y+h))];
++    if closed{c.push(DrawCommand::LineTo(p(x,y)));}c
++}
++#[test]
++fn rectangle_fast_triangles_are_bit_exact_lyon_order(){
++    let mut state=12351u32;let mut tess=FillTessellator::new();let mut vertices: VertexBuffers<Vertex,u32>=VertexBuffers::new();let mut checked=0;
++    for i in 0..100000{
++        let mut next=||{state=state.wrapping_mul(1664525).wrapping_add(1013904223);state};
++        let x=(next()%900000)as i32-450000;let y=(next()%900000)as i32-450000;let w=10+(next()%30000)as i32;let h=10+(next()%30000)as i32;
++        let mut c=commands(x,y,w,h,i%2==0);if i%3==0 { c.insert(0,DrawCommand::MoveTo(swf::Point::ZERO)); }let p=bitmap_rectangle(&c).expect("explicit positive bounded rectangle");
++        for rule in[tessellation::FillRule::EvenOdd,tessellation::FillRule::NonZero]{
++            vertices.vertices.clear();vertices.indices.clear();tess.tessellate_path(&ruffle_path_to_lyon_path(&c,true),&FillOptions::default().with_fill_rule(rule),&mut BuffersBuilder::new(&mut vertices,RuffleVertexCtor{color:swf::Color::WHITE})).expect("original Lyon rectangle");
++            let actual:Vec<_>=vertices.indices.iter().map(|i|{let v=&vertices.vertices[*i as usize];(v.x.to_bits(),v.y.to_bits())}).collect();
++            let fast:Vec<_>=[1,0,3,1,3,2].into_iter().map(|i|(p[i][0].to_bits(),p[i][1].to_bits())).collect();assert_eq!(fast,actual,"same vertex values AND triangle order, probe {i}");checked+=1;
++        }
++    }
++    assert_eq!(checked,200000);
++}
++#[test]
++fn bitmap_shape_reaches_direct_path_and_keeps_original_triangles(){
++    struct Source;
++    impl crate::bitmap::BitmapSource for Source {
++        fn bitmap_size(&self,id:u16)->Option<crate::bitmap::BitmapSize>{assert_eq!(id,1);Some(crate::bitmap::BitmapSize{width:4,height:4})}
++        fn bitmap_handle(&self,_:u16,_:&mut dyn crate::backend::RenderBackend)->Option<crate::bitmap::BitmapHandle>{panic!("Tessellation should not allocate a GPU bitmap")}
++    }
++    let fill=swf::FillStyle::Bitmap{id:1,matrix:Default::default(),is_smoothed:true,is_repeating:false};
++    let c=commands(-121,33,640,480,true);let bounds=swf::Rectangle{x_min:swf::Twips::new(-121),y_min:swf::Twips::new(33),x_max:swf::Twips::new(519),y_max:swf::Twips::new(513)};
++    let before=rectangle_hits();let mesh=ShapeTessellator::new().tessellate_shape(DistilledShape{id:1,shape_bounds:bounds,edge_bounds:bounds,paths:vec![DrawPath::Fill{style:&fill,commands:c.clone(),winding_rule:crate::shape_utils::FillRule::EvenOdd}]},&Source);assert_eq!(rectangle_hits(),before+1);assert_eq!(mesh.draws.len(),1);
++    let draw=&mesh.draws[0];assert_eq!(draw.mask_index_count,6);assert!(matches!(draw.draw_type,DrawType::Bitmap(_)));let p=bitmap_rectangle(&c).unwrap();let expanded:Vec<_>=draw.indices.iter().map(|i|{let v=&draw.vertices[*i as usize];assert_eq!(v.color,swf::Color::WHITE);(v.x.to_bits(),v.y.to_bits())}).collect();let expected:Vec<_>=[1,0,3,1,3,2].into_iter().map(|i|(p[i][0].to_bits(),p[i][1].to_bits())).collect();assert_eq!(expanded,expected);
++}
++#[test]
++fn noncanonical_or_unbounded_paths_keep_original_geometry_path(){
++    for c in[commands(0,0,9,20,true),commands(0,0,20,9,true),commands(0,0,-20,20,true),commands(0,0,20,-20,true),commands(700000,0,20,20,true)]{assert!(bitmap_rectangle(&c).is_none());}
++    let mut c=commands(0,0,20,20,true);c[1]=DrawCommand::LineTo(swf::Point{x:swf::Twips::new(21),y:swf::Twips::new(1)});assert!(bitmap_rectangle(&c).is_none());
++    let mut c=commands(0,0,20,20,true);c[4]=DrawCommand::LineTo(swf::Point{x:swf::Twips::new(1),y:swf::Twips::new(0)});assert!(bitmap_rectangle(&c).is_none());
++    let c=commands(0,0,20,20,true);assert!(bitmap_rectangle(&c[..3]).is_none());
++}

@@ -50,6 +50,7 @@ def build(work, output):
         subprocess.run(command, cwd=cwd, env=env | (extra or {}), check=True)
     run(['npm', 'ci', '--no-audit', '--no-fund'], web)
     run(['cargo', 'test', '--locked', '-p', 'ruffle_core'])
+    run(['cargo', 'test', '--locked', '-p', 'ruffle_render', '--features', 'tessellator'])
     run(['cargo', 'test', '--locked', '-p', 'ruffle_render_wgpu'])
     for test in ['textline_', 'bitmapdata_draw', 'bitmapdata_clone', 'openrotmg_bitmap_compat', 'openrotmg_focus_activation', 'mouse_wheel_events', 'openrotmg_wheel_accumulator',
                  'openrotmg_unused_locals', 'openrotmg_slot_read', 'openrotmg_sort_snapshot', 'openrotmg_bitmap_batch']:
