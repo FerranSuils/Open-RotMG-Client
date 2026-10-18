@@ -37,7 +37,6 @@ jobs:
           print('rust='+p['rustVersion'])
           print('bindgen='+p['wasmBindgenVersion'])
           print('version='+p['version'])
-          print('binaryen='+p['wasmOptVersion'])
           PY
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -52,14 +51,6 @@ jobs:
           echo '61d4a7dc85acfa0d2354ccc0b8361928c7e52a746d17f28ebaa795ed3dc1614a  bindgen.tar.gz' | sha256sum --check
           tar -xzf bindgen.tar.gz
           echo "$PWD/wasm-bindgen-$VERSION-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
-      - name: Install verified Binaryen
-        env:
-          VERSION: ${{ steps.pins.outputs.binaryen }}
-        run: |
-          curl --fail --location --retry 2 "https://github.com/WebAssembly/binaryen/releases/download/version_$VERSION/binaryen-version_$VERSION-x86_64-linux.tar.gz" -o binaryen.tar.gz
-          echo '50b9fa62b9abea752da92ec57e0c555fee578760cd237c40107957715d2976ba  binaryen.tar.gz' | sha256sum --check
-          tar -xzf binaryen.tar.gz
-          echo "$PWD/binaryen-version_$VERSION/bin" >> "$GITHUB_PATH"
       - name: Build both variants and run Flash-reference tests
         run: python3 scripts/build_ruffle.py --work-dir "$RUNNER_TEMP/ruffle-build" --output "$PWD/ruffle-${{ steps.pins.outputs.version }}.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
