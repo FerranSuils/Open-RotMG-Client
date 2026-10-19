@@ -38,7 +38,7 @@ class LauncherTests(unittest.TestCase):
 
 class ClientRoutingTests(unittest.TestCase):
     def test_loading_status_clears_without_gameplay_disclaimers(self):
-        html = (run.ROOT / "index.html").read_text()
+        html = (run.ROOT / "launcher.js").read_text()
         self.assertIn("document.querySelector('#status').textContent = '';", html)
         self.assertIn("document.querySelector('#status').textContent = String(error);", html)
         self.assertNotIn("historically verified game", html)
@@ -46,24 +46,30 @@ class ClientRoutingTests(unittest.TestCase):
         self.assertNotIn("External requests are blocked", html)
 
     def test_focus_loss_releases_held_game_keys(self):
-        result = subprocess.run(["node", "--test", str(run.ROOT / "tests/input.mjs")],
+        result = subprocess.run(["node", "--test", str(run.ROOT / "tests/input.mjs"), str(run.ROOT / "tests/launcher.mjs")],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_only_legacy_game_account_api_urls_are_rewritten(self):
-        html = (run.ROOT / "index.html").read_text()
+    def test_only_legacy_game_account_picture_api_urls_are_rewritten(self):
+        html = (run.ROOT / "launcher.js").read_text()
         pattern = re.search(r"\[/([^\n]+?)/,accountEndpoint\]", html).group(1).replace(r"\/", "/")
         for port in [8080, 18923, 65535]:
             origin = f"http://127.0.0.1:{port}"
-            for path in ["client.swf", "vendor/ruffle.js", "sfx/death_screen.mp3", "legacy-api/char/list", "game", "health"]:
+            for path in ["client.swf", "native-texture-editor.swf", "draw.html", "launcher.js", "vendor/ruffle.js", "sfx/death_screen.mp3", "legacy-api/char/list", "game", "health"]:
                 with self.subTest(port=port, path=path):
                     url = f"{origin}/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), url)
             for protocol in ["http", "https"]:
-                for path in ["char/list", "char/fame", "account/register", "account/verify", "fame/list", "guild/listMembers", "guild/getBoard", "guild/setBoard"]:
+                for path in ["char/list", "char/fame", "account/register", "account/verify", "fame/list", "guild/listMembers", "guild/getBoard", "guild/setBoard",
+                             "picture/save", "picture/list", "picture/get", "picture/delete"]:
                     url = f"{protocol}://127.0.0.1:8080/{path}"
                     self.assertEqual(re.sub(pattern, origin + "/legacy-api/", url), origin + "/legacy-api/" + path)
-        for foreign in ["https://127.0.0.1.evil.example:8080/char/list", "http://127.0.0.1:8080/accounting/report", "http://127.0.0.1:8080/credits/buy"]:
+        for foreign in ["https://127.0.0.1.evil.example:8080/char/list", "http://127.0.0.1:8080/accounting/report", "http://127.0.0.1:8080/credits/buy",
+                        "http://127.0.0.1:8080/pictures/list", "http://127.0.0.1:8080/picture",
+                        "http://127.0.0.1:8081/picture/get", "http://localhost:8080/picture/get",
+                        "http://127.0.0.1:8080.evil.example/picture/get", "http://127.0.0.1:8080@evil.example/picture/get",
+                        "http://evil.example/picture/get", "ftp://127.0.0.1:8080/picture/get",
+                        "http://127.0.0.1:8080/not/picture/get", "http://127.0.0.1:8080/?next=/picture/get"]:
             self.assertEqual(re.sub(pattern, "/legacy-api/", foreign), foreign)
 
 
