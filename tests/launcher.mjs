@@ -14,12 +14,19 @@ for (const [page, mode, movie] of [['index.html', 'game', '/client.swf'], ['draw
     let options;
     const player = {addEventListener() {}, ruffle: () => ({load: async value => {options = value;}})};
     const nodes = {'#client': {dataset: {mode}, append() {}}, '#status': {}};
-    await vm.runInNewContext(script, {window: {addEventListener() {}, RufflePlayer: {newest: () => ({createPlayer: () => player})}},
+    const window = {addEventListener() {}, crypto: globalThis.crypto, RufflePlayer: {newest: () => ({createPlayer: () => player})}};
+    await vm.runInNewContext(script, {window,
       document: {querySelector: key => nodes[key]}, URL, location: {href: `http://127.0.0.1:18923/${page}?url=https://evil.example/a.swf`}});
     assert.equal(options.url, movie);
     assert.equal(options.allowScriptAccess, false);
     assert.equal(options.openUrlMode, 'deny');
-    assert.equal(options.socketProxy[0].proxyUrl, 'ws://127.0.0.1:18923/game');
+    if (mode === 'game') {
+      // The game socket carries the random key of the augment card overlay.
+      assert.match(options.socketProxy[0].proxyUrl, /^ws:\/\/127\.0\.0\.1:18923\/game\?panel=[0-9a-f]{32}$/);
+      assert.equal(options.socketProxy[0].proxyUrl.split('=')[1], window.rotmgPanelKey);
+    } else {
+      assert.equal(options.socketProxy[0].proxyUrl, 'ws://127.0.0.1:18923/game');
+    }
     assert.equal(options.urlRewriteRules[0][1], 'http://127.0.0.1:18923/legacy-api/');
     assert.equal(options.urlRewriteRules[1][1], 'http://127.0.0.1:18923/sfx/');
     const rewrite = url => options.urlRewriteRules.reduce((value, [pattern, replacement]) => value.replace(pattern, replacement), url);
